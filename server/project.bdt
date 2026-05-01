@@ -1,0 +1,28 @@
+[project]
+name = CLeonOSPkgServer
+default = sample
+build_dir = build/bdt
+language = zh-CN
+doctor_tools = CC,LD
+
+[tools]
+CC = gcc
+LD = ld
+
+[target.sample]
+type = command
+command = CC="{CC}" LD="{LD}" sh "{root}/scripts/build_sample.sh"
+cache = false
+always = true
+
+[target.clean]
+type = remove
+inputs = {root}/build, {root}/packages/hello/hello.elf, {root}/packages/hello/package.ini
+cache = false
+always = true
+
+[target.help]
+type = command
+command = echo "use: bdt sample"
+cache = false
+always = true
