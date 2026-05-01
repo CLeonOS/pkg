@@ -8,7 +8,7 @@
 #define PKG_DB_DIR "/system/pkg"
 #define PKG_DB_PATH "/system/pkg/installed.db"
 #define PKG_REPO_PATH "/system/pkg/repo.conf"
-#define PKG_DEFAULT_REPO "http://localhost:8101/pkg/index.php"
+#define PKG_DEFAULT_REPO "http://clospkg.ecuil.com"
 #define PKG_TMP_MANIFEST "/temp/p.clpkg"
 #define PKG_TMP_ELF "/temp/p.elf"
 #define PKG_TMP_API "/temp/pkg_api.json"
