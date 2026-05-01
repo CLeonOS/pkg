@@ -18,10 +18,14 @@
 #define PKG_VERSION_MAX 32U
 #define PKG_DESC_MAX 128U
 #define PKG_SIZE_MAX 32U
+#define PKG_DEPENDS_MAX 256U
+#define PKG_CATEGORY_MAX 64U
+#define PKG_TAGS_MAX 128U
 #define PKG_URL_MAX 384U
 #define PKG_TEXT_MAX 32768U
 #define PKG_COPY_CHUNK 4096U
 #define PKG_UPGRADE_ALL_MAX 64U
+#define PKG_DEP_DEPTH_MAX 8U
 
 typedef unsigned char pkg_u8;
 
@@ -32,6 +36,9 @@ typedef struct pkg_manifest {
     char url[PKG_URL_MAX];
     char path[USH_PATH_MAX];
     char description[PKG_DESC_MAX];
+    char depends[PKG_DEPENDS_MAX];
+    char category[PKG_CATEGORY_MAX];
+    char tags[PKG_TAGS_MAX];
 } pkg_manifest;
 
 typedef struct pkg_remote_package {
@@ -39,17 +46,31 @@ typedef struct pkg_remote_package {
     char version[PKG_VERSION_MAX];
     char target[USH_PATH_MAX];
     char description[PKG_DESC_MAX];
+    char depends[PKG_DEPENDS_MAX];
+    char category[PKG_CATEGORY_MAX];
+    char tags[PKG_TAGS_MAX];
     char size[PKG_SIZE_MAX];
     char owner[PKG_NAME_MAX];
     char manifest_url[PKG_URL_MAX];
     char download_url[PKG_URL_MAX];
 } pkg_remote_package;
 
+typedef struct pkg_dependency {
+    char name[PKG_NAME_MAX];
+    char op[3];
+    char version[PKG_VERSION_MAX];
+} pkg_dependency;
+
 static char pkg_text_buf[PKG_TEXT_MAX];
 static char pkg_db_buf[PKG_TEXT_MAX];
 static char pkg_db_new_buf[PKG_TEXT_MAX];
 static pkg_u8 pkg_copy_buf[PKG_COPY_CHUNK];
 static char pkg_upgrade_names[PKG_UPGRADE_ALL_MAX][PKG_NAME_MAX];
+
+static int pkg_install_manifest_file_with_depth(const ush_state *sh, const char *manifest_path, const char *origin,
+                                                int origin_is_url, u64 depth);
+static int pkg_install_repo_package_with_depth(const ush_state *sh, const char *name, const char *constraint_op,
+                                               const char *constraint_version, u64 depth);
 
 static int pkg_has_prefix(const char *text, const char *prefix) {
     u64 i = 0ULL;
@@ -105,6 +126,24 @@ static int pkg_safe_name(const char *name) {
     }
 
     return (i > 0ULL && i < (u64)PKG_NAME_MAX) ? 1 : 0;
+}
+
+static int pkg_safe_version_text(const char *version) {
+    u64 i;
+
+    if (version == (const char *)0 || version[0] == '\0') {
+        return 0;
+    }
+
+    for (i = 0ULL; version[i] != '\0'; i++) {
+        char ch = version[i];
+        if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_' ||
+              ch == '-' || ch == '.' || ch == ':' || ch == '+' || ch == '~')) {
+            return 0;
+        }
+    }
+
+    return (i > 0ULL && i < (u64)PKG_VERSION_MAX) ? 1 : 0;
 }
 
 static char *pkg_trim_mut(char *text) {
@@ -688,6 +727,12 @@ static int pkg_parse_manifest(char *text, pkg_manifest *out_manifest) {
                     }
                 } else if (ush_streq(key, "description") != 0 || ush_streq(key, "desc") != 0) {
                     pkg_copy_trimmed(out_manifest->description, (u64)sizeof(out_manifest->description), value);
+                } else if (ush_streq(key, "depends") != 0 || ush_streq(key, "dependencies") != 0) {
+                    pkg_copy_trimmed(out_manifest->depends, (u64)sizeof(out_manifest->depends), value);
+                } else if (ush_streq(key, "category") != 0) {
+                    pkg_copy_trimmed(out_manifest->category, (u64)sizeof(out_manifest->category), value);
+                } else if (ush_streq(key, "tags") != 0) {
+                    pkg_copy_trimmed(out_manifest->tags, (u64)sizeof(out_manifest->tags), value);
                 }
             }
         }
@@ -913,6 +958,9 @@ static int pkg_parse_remote_package_object(const char *start, const char *end, p
     (void)pkg_json_get_string(start, end, "version", out->version, (u64)sizeof(out->version));
     (void)pkg_json_get_string(start, end, "target", out->target, (u64)sizeof(out->target));
     (void)pkg_json_get_string(start, end, "description", out->description, (u64)sizeof(out->description));
+    (void)pkg_json_get_string(start, end, "depends", out->depends, (u64)sizeof(out->depends));
+    (void)pkg_json_get_string(start, end, "category", out->category, (u64)sizeof(out->category));
+    (void)pkg_json_get_string(start, end, "tags", out->tags, (u64)sizeof(out->tags));
     (void)pkg_json_get_string(start, end, "owner", out->owner, (u64)sizeof(out->owner));
     (void)pkg_json_get_string(start, end, "manifest_url", out->manifest_url, (u64)sizeof(out->manifest_url));
     (void)pkg_json_get_string(start, end, "download_url", out->download_url, (u64)sizeof(out->download_url));
@@ -994,6 +1042,323 @@ static void pkg_print_api_error_or_default(const char *text, const char *fallbac
     } else {
         (void)puts(fallback);
     }
+}
+
+static int pkg_char_is_digit(char ch) {
+    return (ch >= '0' && ch <= '9') ? 1 : 0;
+}
+
+static char pkg_char_lower(char ch) {
+    if (ch >= 'A' && ch <= 'Z') {
+        return (char)(ch - 'A' + 'a');
+    }
+    return ch;
+}
+
+static int pkg_version_compare(const char *left, const char *right) {
+    u64 li = 0ULL;
+    u64 ri = 0ULL;
+
+    if (left == (const char *)0) {
+        left = "";
+    }
+    if (right == (const char *)0) {
+        right = "";
+    }
+
+    while (left[li] != '\0' || right[ri] != '\0') {
+        if (pkg_char_is_digit(left[li]) != 0 && pkg_char_is_digit(right[ri]) != 0) {
+            u64 lz = li;
+            u64 rz = ri;
+            u64 lend;
+            u64 rend;
+            u64 llen;
+            u64 rlen;
+            u64 off;
+
+            while (left[lz] == '0') {
+                lz++;
+            }
+            while (right[rz] == '0') {
+                rz++;
+            }
+            lend = lz;
+            rend = rz;
+            while (pkg_char_is_digit(left[lend]) != 0) {
+                lend++;
+            }
+            while (pkg_char_is_digit(right[rend]) != 0) {
+                rend++;
+            }
+            llen = lend - lz;
+            rlen = rend - rz;
+            if (llen != rlen) {
+                return (llen > rlen) ? 1 : -1;
+            }
+            for (off = 0ULL; off < llen; off++) {
+                if (left[lz + off] != right[rz + off]) {
+                    return (left[lz + off] > right[rz + off]) ? 1 : -1;
+                }
+            }
+            li = lend;
+            ri = rend;
+            continue;
+        }
+
+        if (pkg_char_lower(left[li]) != pkg_char_lower(right[ri])) {
+            return (pkg_char_lower(left[li]) > pkg_char_lower(right[ri])) ? 1 : -1;
+        }
+        if (left[li] != '\0') {
+            li++;
+        }
+        if (right[ri] != '\0') {
+            ri++;
+        }
+    }
+
+    return 0;
+}
+
+static int pkg_version_satisfies(const char *version, const char *op, const char *required) {
+    int cmp;
+
+    if (op == (const char *)0 || op[0] == '\0') {
+        return 1;
+    }
+    if (version == (const char *)0 || version[0] == '\0' || required == (const char *)0 || required[0] == '\0') {
+        return 0;
+    }
+
+    cmp = pkg_version_compare(version, required);
+    if (ush_streq(op, "=") != 0 || ush_streq(op, "==") != 0) {
+        return (cmp == 0) ? 1 : 0;
+    }
+    if (ush_streq(op, "!=") != 0) {
+        return (cmp != 0) ? 1 : 0;
+    }
+    if (ush_streq(op, ">") != 0) {
+        return (cmp > 0) ? 1 : 0;
+    }
+    if (ush_streq(op, ">=") != 0) {
+        return (cmp >= 0) ? 1 : 0;
+    }
+    if (ush_streq(op, "<") != 0) {
+        return (cmp < 0) ? 1 : 0;
+    }
+    if (ush_streq(op, "<=") != 0) {
+        return (cmp <= 0) ? 1 : 0;
+    }
+    return 0;
+}
+
+static int pkg_parse_dependency_spec(const char *spec, pkg_dependency *out) {
+    char tmp[128];
+    char *text;
+    char *op_pos = (char *)0;
+    char *version;
+    char op_ch;
+    u64 i;
+
+    if (spec == (const char *)0 || out == (pkg_dependency *)0) {
+        return 0;
+    }
+
+    ush_zero(out, (u64)sizeof(*out));
+    ush_copy(tmp, (u64)sizeof(tmp), spec);
+    text = pkg_trim_mut(tmp);
+    if (text[0] == '\0') {
+        return 0;
+    }
+
+    for (i = 0ULL; text[i] != '\0'; i++) {
+        if (text[i] == '<' || text[i] == '>' || text[i] == '=' || text[i] == '!' || text[i] == '@') {
+            op_pos = text + i;
+            break;
+        }
+    }
+
+    if (op_pos == (char *)0) {
+        pkg_copy_trimmed(out->name, (u64)sizeof(out->name), text);
+        return pkg_safe_name(out->name);
+    }
+
+    op_ch = *op_pos;
+    *op_pos = '\0';
+    pkg_copy_trimmed(out->name, (u64)sizeof(out->name), text);
+    if (pkg_safe_name(out->name) == 0) {
+        return 0;
+    }
+
+    op_pos++;
+    if (op_ch == '@') {
+        ush_copy(out->op, (u64)sizeof(out->op), "=");
+        version = op_pos;
+    } else if ((op_ch == '<' || op_ch == '>' || op_ch == '!' || op_ch == '=') && *op_pos == '=') {
+        out->op[0] = op_ch;
+        out->op[1] = '=';
+        out->op[2] = '\0';
+        version = op_pos + 1;
+    } else if (op_ch == '<' || op_ch == '>' || op_ch == '=') {
+        out->op[0] = (op_ch == '=') ? '=' : op_ch;
+        out->op[1] = '\0';
+        version = op_pos;
+    } else {
+        return 0;
+    }
+
+    pkg_copy_trimmed(out->version, (u64)sizeof(out->version), version);
+    return (pkg_safe_version_text(out->version) != 0) ? 1 : 0;
+}
+
+static int pkg_find_installed_version_text(const char *db_text, const char *name, char *out_version, u64 out_size) {
+    const char *line;
+
+    if (out_version != (char *)0 && out_size > 0ULL) {
+        out_version[0] = '\0';
+    }
+    if (db_text == (const char *)0 || name == (const char *)0 || pkg_safe_name(name) == 0) {
+        return 0;
+    }
+
+    line = db_text;
+    while (*line != '\0') {
+        const char *next = line;
+        char copy[384];
+        u64 len = 0ULL;
+        char *version;
+
+        while (*next != '\0' && *next != '\n') {
+            if (len + 1ULL < (u64)sizeof(copy)) {
+                copy[len] = *next;
+                len++;
+            }
+            next++;
+        }
+        copy[len] = '\0';
+        if (*next == '\n') {
+            next++;
+        }
+
+        version = strchr(copy, '|');
+        if (version != (char *)0) {
+            *version = '\0';
+            version++;
+            if (ush_streq(copy, name) != 0) {
+                char *target = strchr(version, '|');
+                if (target != (char *)0) {
+                    *target = '\0';
+                }
+                if (out_version != (char *)0 && out_size > 0ULL) {
+                    ush_copy(out_version, out_size, version);
+                }
+                return 1;
+            }
+        }
+
+        line = next;
+    }
+
+    return 0;
+}
+
+static int pkg_installed_dependency_satisfies(const pkg_dependency *dep) {
+    u64 len = 0ULL;
+    char installed_version[PKG_VERSION_MAX];
+
+    if (dep == (const pkg_dependency *)0 || pkg_safe_name(dep->name) == 0) {
+        return 0;
+    }
+
+    if (pkg_read_file(PKG_DB_PATH, pkg_db_buf, (u64)sizeof(pkg_db_buf), &len) == 0 || len == 0ULL) {
+        return 0;
+    }
+
+    if (pkg_find_installed_version_text(pkg_db_buf, dep->name, installed_version, (u64)sizeof(installed_version)) == 0) {
+        return 0;
+    }
+
+    return pkg_version_satisfies(installed_version, dep->op, dep->version);
+}
+
+static int pkg_remote_dependency_can_satisfy(const pkg_dependency *dep) {
+    pkg_remote_package package;
+    u64 len = 0ULL;
+
+    if (dep == (const pkg_dependency *)0) {
+        return 0;
+    }
+
+    if (pkg_fetch_api("info", "name", dep->name, pkg_text_buf, (u64)sizeof(pkg_text_buf), &len) == 0) {
+        return 0;
+    }
+    (void)len;
+
+    if (pkg_parse_info_package(pkg_text_buf, &package) == 0) {
+        pkg_print_api_error_or_default(pkg_text_buf, "pkg: dependency not found in repository");
+        return 0;
+    }
+
+    if (pkg_version_satisfies(package.version, dep->op, dep->version) == 0) {
+        if (dep->op[0] != '\0') {
+            (void)printf("pkg: dependency %s remote version %s does not satisfy %s%s\n", dep->name, package.version,
+                         dep->op, dep->version);
+        } else {
+            (void)printf("pkg: dependency %s has invalid remote version\n", dep->name);
+        }
+        return 0;
+    }
+
+    return 1;
+}
+
+static int pkg_install_dependency_list(const ush_state *sh, const char *depends, u64 depth) {
+    char list[PKG_DEPENDS_MAX];
+    char *item;
+
+    if (sh == (const ush_state *)0 || depends == (const char *)0 || depends[0] == '\0') {
+        return 1;
+    }
+
+    if (depth >= (u64)PKG_DEP_DEPTH_MAX) {
+        (void)puts("pkg: dependency recursion too deep");
+        return 0;
+    }
+
+    ush_copy(list, (u64)sizeof(list), depends);
+    item = list;
+    while (item != (char *)0 && *item != '\0') {
+        char *next = strchr(item, ',');
+        char *trimmed;
+        pkg_dependency dep;
+
+        if (next != (char *)0) {
+            *next = '\0';
+            next++;
+        }
+
+        trimmed = pkg_trim_mut(item);
+        if (trimmed[0] != '\0') {
+            if (pkg_parse_dependency_spec(trimmed, &dep) == 0) {
+                (void)printf("pkg: invalid dependency: %s\n", trimmed);
+                return 0;
+            }
+            if (pkg_installed_dependency_satisfies(&dep) == 0) {
+                if (dep.op[0] != '\0') {
+                    (void)printf("pkg: install dependency %s%s%s\n", dep.name, dep.op, dep.version);
+                } else {
+                    (void)printf("pkg: install dependency %s\n", dep.name);
+                }
+                if (pkg_remote_dependency_can_satisfy(&dep) == 0 ||
+                    pkg_install_repo_package_with_depth(sh, dep.name, dep.op, dep.version, depth + 1ULL) == 0) {
+                    return 0;
+                }
+            }
+        }
+
+        item = next;
+    }
+
+    return 1;
 }
 
 static int pkg_resolve_local_path(const ush_state *sh, const char *arg, char *out, u64 out_size) {
@@ -1153,7 +1518,8 @@ static int pkg_complete_manifest(const ush_state *sh, pkg_manifest *manifest, co
     return 1;
 }
 
-static int pkg_install_manifest_file(const ush_state *sh, const char *manifest_path, const char *origin, int origin_is_url) {
+static int pkg_install_manifest_file_with_depth(const ush_state *sh, const char *manifest_path, const char *origin,
+                                                int origin_is_url, u64 depth) {
     pkg_manifest manifest;
     u64 manifest_len = 0ULL;
     const char *elf_source = (const char *)0;
@@ -1173,6 +1539,10 @@ static int pkg_install_manifest_file(const ush_state *sh, const char *manifest_p
         return 0;
     }
 
+    if (pkg_install_dependency_list(sh, manifest.depends, depth) == 0) {
+        return 0;
+    }
+
     if (manifest.url[0] != '\0') {
         (void)printf("pkg: download %s\n", manifest.url);
         if (pkg_download_to(manifest.url, PKG_TMP_ELF) == 0) {
@@ -1187,6 +1557,10 @@ static int pkg_install_manifest_file(const ush_state *sh, const char *manifest_p
     }
 
     return pkg_install_elf_file(&manifest, elf_source, (origin != (const char *)0) ? origin : manifest_path);
+}
+
+static int pkg_install_manifest_file(const ush_state *sh, const char *manifest_path, const char *origin, int origin_is_url) {
+    return pkg_install_manifest_file_with_depth(sh, manifest_path, origin, origin_is_url, 0ULL);
 }
 
 static int pkg_install_url_elf(const char *url) {
@@ -1207,13 +1581,35 @@ static int pkg_install_url_elf(const char *url) {
     return pkg_install_elf_file(&manifest, PKG_TMP_ELF, url);
 }
 
-static int pkg_install_repo_package(const ush_state *sh, const char *name) {
+static int pkg_install_repo_package_with_depth(const ush_state *sh, const char *name, const char *constraint_op,
+                                               const char *constraint_version, u64 depth) {
     char repo[PKG_URL_MAX];
     char manifest_url[PKG_URL_MAX];
+    pkg_remote_package package;
+    u64 api_len = 0ULL;
 
     if (pkg_safe_name(name) == 0) {
         (void)puts("pkg: invalid package name");
         return 0;
+    }
+
+    if (depth >= (u64)PKG_DEP_DEPTH_MAX) {
+        (void)puts("pkg: dependency recursion too deep");
+        return 0;
+    }
+
+    if (constraint_op != (const char *)0 && constraint_op[0] != '\0') {
+        if (pkg_fetch_api("info", "name", name, pkg_text_buf, (u64)sizeof(pkg_text_buf), &api_len) == 0 ||
+            pkg_parse_info_package(pkg_text_buf, &package) == 0) {
+            pkg_print_api_error_or_default(pkg_text_buf, "pkg: package not found in repository");
+            return 0;
+        }
+        (void)api_len;
+        if (pkg_version_satisfies(package.version, constraint_op, constraint_version) == 0) {
+            (void)printf("pkg: %s remote version %s does not satisfy %s%s\n", name, package.version, constraint_op,
+                         (constraint_version != (const char *)0) ? constraint_version : "");
+            return 0;
+        }
     }
 
     if (pkg_load_repo(repo, (u64)sizeof(repo)) == 0 ||
@@ -1226,7 +1622,11 @@ static int pkg_install_repo_package(const ush_state *sh, const char *name) {
     if (pkg_download_to(manifest_url, PKG_TMP_MANIFEST) == 0) {
         return 0;
     }
-    return pkg_install_manifest_file(sh, PKG_TMP_MANIFEST, manifest_url, 1);
+    return pkg_install_manifest_file_with_depth(sh, PKG_TMP_MANIFEST, manifest_url, 1, depth);
+}
+
+static int pkg_install_repo_package(const ush_state *sh, const char *name) {
+    return pkg_install_repo_package_with_depth(sh, name, (const char *)0, (const char *)0, 0ULL);
 }
 
 static int pkg_cmd_install(const ush_state *sh, const char *arg) {
@@ -1266,6 +1666,13 @@ static int pkg_cmd_install(const ush_state *sh, const char *arg) {
             return 0;
         }
         return pkg_install_manifest_file(sh, manifest_abs, manifest_abs, 0);
+    }
+
+    {
+        pkg_dependency dep;
+        if (pkg_parse_dependency_spec(first, &dep) != 0 && dep.op[0] != '\0') {
+            return pkg_install_repo_package_with_depth(sh, dep.name, dep.op, dep.version, 0ULL);
+        }
     }
 
     if (pkg_safe_name(first) != 0) {
@@ -1558,8 +1965,8 @@ static int pkg_cmd_info(const char *arg) {
 }
 
 static void pkg_print_remote_header(void) {
-    (void)puts("name               version      size       description");
-    (void)puts("----------------------------------------------------------------");
+    (void)puts("name               version      category     size       description");
+    (void)puts("----------------------------------------------------------------------------");
 }
 
 static void pkg_print_remote_line(const pkg_remote_package *package) {
@@ -1567,7 +1974,8 @@ static void pkg_print_remote_line(const pkg_remote_package *package) {
         return;
     }
 
-    (void)printf("%-18s %-12s %-10s %s\n", package->name, package->version, package->size, package->description);
+    (void)printf("%-18s %-12s %-12s %-10s %s\n", package->name, package->version, package->category, package->size,
+                 package->description);
 }
 
 static int pkg_cmd_remote_list(void) {
@@ -1630,6 +2038,9 @@ static int pkg_cmd_remote_info(const char *arg) {
     (void)printf("version: %s\n", package.version);
     (void)printf("target: %s\n", package.target);
     (void)printf("size: %s\n", package.size);
+    (void)printf("depends: %s\n", package.depends);
+    (void)printf("category: %s\n", package.category);
+    (void)printf("tags: %s\n", package.tags);
     (void)printf("owner: %s\n", package.owner);
     (void)printf("description: %s\n", package.description);
     (void)printf("manifest: %s\n", package.manifest_url);
@@ -1689,6 +2100,46 @@ static int pkg_cmd_search(const char *arg) {
     cursor = pkg_json_find_named_array(pkg_text_buf, "packages");
     if (cursor == (const char *)0) {
         pkg_print_api_error_or_default(pkg_text_buf, "pkg: invalid search API response");
+        return 0;
+    }
+
+    pkg_print_remote_header();
+    while (pkg_remote_next_package(&cursor, &package) != 0) {
+        pkg_print_remote_line(&package);
+        any = 1;
+    }
+
+    if (any == 0) {
+        (void)puts("pkg: no matches");
+    }
+    return 1;
+}
+
+static int pkg_cmd_filter_remote(const char *api, const char *label, const char *arg) {
+    char query[PKG_URL_MAX];
+    const char *cursor;
+    pkg_remote_package package;
+    u64 len = 0ULL;
+    int any = 0;
+
+    if (api == (const char *)0 || label == (const char *)0 || arg == (const char *)0) {
+        return 0;
+    }
+
+    pkg_copy_trimmed(query, (u64)sizeof(query), arg);
+    if (query[0] == '\0') {
+        (void)printf("usage: pkg %s <name>\n", label);
+        return 0;
+    }
+
+    if (pkg_fetch_api(api, "name", query, pkg_text_buf, (u64)sizeof(pkg_text_buf), &len) == 0) {
+        return 0;
+    }
+    (void)len;
+
+    cursor = pkg_json_find_named_array(pkg_text_buf, "packages");
+    if (cursor == (const char *)0) {
+        pkg_print_api_error_or_default(pkg_text_buf, "pkg: invalid filter API response");
         return 0;
     }
 
@@ -1924,12 +2375,14 @@ static void pkg_usage(void) {
     (void)puts("  pkg remote list");
     (void)puts("  pkg remote info <name>");
     (void)puts("  pkg search <keyword>");
+    (void)puts("  pkg category <name>");
+    (void)puts("  pkg tag <name>");
     (void)puts("  pkg update");
     (void)puts("  pkg upgrade <name>");
     (void)puts("  pkg upgrade --all");
     (void)puts("  pkg repo [url]");
     (void)puts("");
-    (void)puts("manifest keys: name, version, target, url/path/elf, description");
+    (void)puts("manifest keys: name, version, target, url/path/elf, description, depends, category, tags");
 }
 
 static int pkg_run(const ush_state *sh, const char *arg) {
@@ -1966,6 +2419,12 @@ static int pkg_run(const ush_state *sh, const char *arg) {
     }
     if (ush_streq(cmd, "search") != 0 || ush_streq(cmd, "find") != 0) {
         return pkg_cmd_search(rest);
+    }
+    if (ush_streq(cmd, "category") != 0 || ush_streq(cmd, "cat") != 0) {
+        return pkg_cmd_filter_remote("category", "category", rest);
+    }
+    if (ush_streq(cmd, "tag") != 0) {
+        return pkg_cmd_filter_remote("tag", "tag", rest);
     }
     if (ush_streq(cmd, "update") != 0 || ush_streq(cmd, "check") != 0) {
         if (rest != (const char *)0 && rest[0] != '\0') {

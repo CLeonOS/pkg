@@ -10,9 +10,13 @@ package.ini fields:
 version=1.0.0
 target=/shell/hello.elf
 description=Hello world package built by the CLeonOS kit.
+depends=
+category=demo
+tags=hello,sample
 
 Only the ELF file is required. If package.ini is absent, version defaults to
 1.0.0 and target defaults to /shell/<name>.elf.
+depends, category and tags are optional metadata fields.
 
 Default sample:
 

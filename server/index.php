@@ -19,6 +19,47 @@ function pkg_valid_version(string $version): bool {
     return preg_match('/^[A-Za-z0-9_.:+~-]{1,64}$/', $version) === 1;
 }
 
+function pkg_valid_depends(string $depends): bool {
+    if ($depends === '') {
+        return true;
+    }
+    if (strlen($depends) > 512 || preg_match('/^[A-Za-z0-9_.:+~<>=!@, -]+$/', $depends) !== 1) {
+        return false;
+    }
+
+    foreach (explode(',', $depends) as $dep) {
+        $dep = trim($dep);
+        if ($dep === '') {
+            return false;
+        }
+        if (preg_match('/^([A-Za-z0-9_.-]{1,63})(?:\s*(@|=|==|!=|>=|<=|>|<)\s*([A-Za-z0-9_.:+~-]{1,64}))?$/', $dep) !== 1) {
+            return false;
+        }
+    }
+    return true;
+}
+
+function pkg_valid_category(string $category): bool {
+    return $category === '' || preg_match('/^[A-Za-z0-9_.-]{1,63}$/', $category) === 1;
+}
+
+function pkg_valid_tags(string $tags): bool {
+    if ($tags === '') {
+        return true;
+    }
+    if (strlen($tags) > 256 || preg_match('/^[A-Za-z0-9_. ,+-]+$/', $tags) !== 1) {
+        return false;
+    }
+
+    foreach (explode(',', $tags) as $tag) {
+        $tag = trim($tag);
+        if ($tag === '' || preg_match('/^[A-Za-z0-9_.+-]{1,32}$/', $tag) !== 1) {
+            return false;
+        }
+    }
+    return true;
+}
+
 function pkg_clean_line(string $value, int $maxLen): string {
     $value = trim(str_replace(["\r", "\n"], ' ', $value));
     $value = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/', '', $value) ?? '';
@@ -218,8 +259,12 @@ function pkg_read_meta(string $dir): array {
         'version' => '1.0.0',
         'target' => '',
         'description' => '',
+        'depends' => '',
+        'category' => '',
+        'tags' => '',
         'owner' => '',
         'uploaded_at' => '',
+        'updated_at' => '',
     ];
     $path = $dir . '/package.ini';
     if (is_file($path)) {
@@ -250,16 +295,20 @@ function pkg_package_info(string $repoDir, string $name): ?array {
     $target = $meta['target'] !== '' ? $meta['target'] : '/shell/' . $name . '.elf';
     $mtime = filemtime($elf);
     $size = filesize($elf);
+    $updatedAt = $meta['updated_at'] !== '' ? $meta['updated_at'] : gmdate('c', is_int($mtime) ? $mtime : time());
 
     return [
         'name' => $name,
         'version' => $meta['version'] !== '' ? $meta['version'] : '1.0.0',
         'target' => $target,
         'description' => $meta['description'],
+        'depends' => $meta['depends'],
+        'category' => $meta['category'],
+        'tags' => $meta['tags'],
         'owner' => $meta['owner'],
         'uploaded_at' => $meta['uploaded_at'],
         'size' => is_int($size) ? $size : 0,
-        'updated_at' => gmdate('c', is_int($mtime) ? $mtime : time()),
+        'updated_at' => $updatedAt,
         'manifest_url' => pkg_base_url() . '?manifest=' . rawurlencode($name),
         'download_url' => pkg_base_url() . '?download=' . rawurlencode($name),
     ];
@@ -298,8 +347,48 @@ function pkg_search_packages(string $repoDir, string $query): array {
     $matches = [];
     foreach (pkg_list_packages($repoDir) as $package) {
         $haystack = strtolower((string)$package['name'] . ' ' . (string)$package['description'] . ' ' .
-                               (string)$package['version'] . ' ' . (string)$package['owner']);
+                               (string)$package['version'] . ' ' . (string)$package['owner'] . ' ' .
+                               (string)$package['depends'] . ' ' . (string)$package['category'] . ' ' .
+                               (string)$package['tags']);
         if (pkg_contains($haystack, $query)) {
+            $matches[] = $package;
+        }
+    }
+    return $matches;
+}
+
+function pkg_filter_category_packages(string $repoDir, string $category): array {
+    $category = strtolower(pkg_clean_line($category, 63));
+    $matches = [];
+    foreach (pkg_list_packages($repoDir) as $package) {
+        if (strtolower((string)$package['category']) === $category) {
+            $matches[] = $package;
+        }
+    }
+    return $matches;
+}
+
+function pkg_filter_tag_packages(string $repoDir, string $tag): array {
+    $tag = strtolower(pkg_clean_line($tag, 32));
+    $matches = [];
+    foreach (pkg_list_packages($repoDir) as $package) {
+        foreach (explode(',', (string)$package['tags']) as $item) {
+            if (strtolower(trim($item)) === $tag) {
+                $matches[] = $package;
+                break;
+            }
+        }
+    }
+    return $matches;
+}
+
+function pkg_list_user_packages(string $repoDir, string $username): array {
+    $matches = [];
+    if ($username === '') {
+        return [];
+    }
+    foreach (pkg_list_packages($repoDir) as $package) {
+        if (isset($package['owner']) && is_string($package['owner']) && $package['owner'] === $username) {
             $matches[] = $package;
         }
     }
@@ -324,6 +413,15 @@ function pkg_manifest(string $repoDir, string $name): never {
     echo "url=" . $info['download_url'] . "\n";
     if ($info['description'] !== '') {
         echo "description=" . str_replace(["\r", "\n"], ' ', (string)$info['description']) . "\n";
+    }
+    if ($info['depends'] !== '') {
+        echo "depends=" . str_replace(["\r", "\n"], ' ', (string)$info['depends']) . "\n";
+    }
+    if ($info['category'] !== '') {
+        echo "category=" . str_replace(["\r", "\n"], ' ', (string)$info['category']) . "\n";
+    }
+    if ($info['tags'] !== '') {
+        echo "tags=" . str_replace(["\r", "\n"], ' ', (string)$info['tags']) . "\n";
     }
     exit;
 }
@@ -374,46 +472,29 @@ function pkg_ini_escape(string $value): string {
 
 function pkg_write_package_meta(string $dir, array $meta): bool {
     $lines = [];
-    foreach (['version', 'target', 'description', 'owner', 'uploaded_at'] as $key) {
+    foreach (['version', 'target', 'description', 'depends', 'category', 'tags', 'owner', 'uploaded_at', 'updated_at'] as $key) {
         $value = isset($meta[$key]) && is_string($meta[$key]) ? $meta[$key] : '';
         $lines[] = $key . '=' . pkg_ini_escape($value);
     }
     return file_put_contents($dir . '/package.ini', implode("\n", $lines) . "\n", LOCK_EX) !== false;
 }
 
-function pkg_upload_package(string $repoDir, string $username, array &$outPackage, string &$message): bool {
-    $outPackage = [];
-    if ($username === '') {
-        $message = 'login required';
+function pkg_user_can_edit_package(?array $info, string $username): bool {
+    if ($info === null || $username === '') {
         return false;
     }
+    return isset($info['owner']) && is_string($info['owner']) && $info['owner'] === $username;
+}
 
-    $name = pkg_clean_line((string)($_POST['name'] ?? ''), 63);
-    $version = pkg_clean_line((string)($_POST['version'] ?? ''), 64);
-    $target = pkg_clean_line((string)($_POST['target'] ?? ''), 160);
-    $description = pkg_clean_line((string)($_POST['description'] ?? ''), 512);
+function pkg_post_field(string $key, string $current, int $maxLen): string {
+    if (array_key_exists($key, $_POST)) {
+        return pkg_clean_line((string)$_POST[$key], $maxLen);
+    }
+    return $current;
+}
 
-    if (!pkg_valid_name($name)) {
-        $message = 'invalid package name';
-        return false;
-    }
-    if ($version === '') {
-        $version = '1.0.0';
-    }
-    if (!pkg_valid_version($version)) {
-        $message = 'invalid version';
-        return false;
-    }
-    if ($target === '') {
-        $target = '/shell/' . $name . '.elf';
-    }
-    if (!pkg_target_is_allowed($target)) {
-        $message = 'target must be a safe /shell/*.elf path';
-        return false;
-    }
-
-    $file = $_FILES['elf'] ?? null;
-    if (!is_array($file) || !isset($file['error'], $file['tmp_name'], $file['size'])) {
+function pkg_store_uploaded_elf(array $file, string $elfPath, string &$message): bool {
+    if (!isset($file['error'], $file['tmp_name'], $file['size'])) {
         $message = 'missing ELF upload';
         return false;
     }
@@ -429,6 +510,84 @@ function pkg_upload_package(string $repoDir, string $username, array &$outPackag
     $tmpName = (string)$file['tmp_name'];
     if (!is_file($tmpName) || !pkg_uploaded_file_has_elf_magic($tmpName)) {
         $message = 'uploaded file is not an ELF';
+        return false;
+    }
+
+    $moved = false;
+    if (is_uploaded_file($tmpName)) {
+        $moved = move_uploaded_file($tmpName, $elfPath);
+    } else {
+        $moved = rename($tmpName, $elfPath);
+        if (!$moved) {
+            $moved = copy($tmpName, $elfPath);
+        }
+    }
+    if (!$moved) {
+        $message = 'failed to store uploaded ELF';
+        return false;
+    }
+    @chmod($elfPath, 0644);
+    return true;
+}
+
+function pkg_validate_package_meta(string $name, string $version, string $target, string $depends, string $category,
+                                   string $tags, string &$message): bool {
+    if (!pkg_valid_name($name)) {
+        $message = 'invalid package name';
+        return false;
+    }
+    if ($version === '' || !pkg_valid_version($version)) {
+        $message = 'invalid version';
+        return false;
+    }
+    if (!pkg_target_is_allowed($target)) {
+        $message = 'target must be a safe /shell/*.elf path';
+        return false;
+    }
+    if (!pkg_valid_depends($depends)) {
+        $message = 'invalid dependency list';
+        return false;
+    }
+    if (!pkg_valid_category($category)) {
+        $message = 'invalid category';
+        return false;
+    }
+    if (!pkg_valid_tags($tags)) {
+        $message = 'invalid tags';
+        return false;
+    }
+    return true;
+}
+
+function pkg_upload_package(string $repoDir, string $username, array &$outPackage, string &$message): bool {
+    $outPackage = [];
+    if ($username === '') {
+        $message = 'login required';
+        return false;
+    }
+
+    $name = pkg_clean_line((string)($_POST['name'] ?? ''), 63);
+    $version = pkg_clean_line((string)($_POST['version'] ?? ''), 64);
+    $target = pkg_clean_line((string)($_POST['target'] ?? ''), 160);
+    $description = pkg_clean_line((string)($_POST['description'] ?? ''), 512);
+    $depends = pkg_clean_line((string)($_POST['depends'] ?? ''), 512);
+    $category = pkg_clean_line((string)($_POST['category'] ?? ''), 63);
+    $tags = pkg_clean_line((string)($_POST['tags'] ?? ''), 256);
+
+    if ($version === '') {
+        $version = '1.0.0';
+    }
+    if ($target === '') {
+        $target = '/shell/' . $name . '.elf';
+    }
+
+    if (!pkg_validate_package_meta($name, $version, $target, $depends, $category, $tags, $message)) {
+        return false;
+    }
+
+    $file = $_FILES['elf'] ?? null;
+    if (!is_array($file)) {
+        $message = 'missing ELF upload';
         return false;
     }
 
@@ -453,27 +612,26 @@ function pkg_upload_package(string $repoDir, string $username, array &$outPackag
     }
 
     $elfPath = $dir . '/' . $name . '.elf';
-    $moved = false;
-    if (is_uploaded_file($tmpName)) {
-        $moved = move_uploaded_file($tmpName, $elfPath);
-    } else {
-        $moved = rename($tmpName, $elfPath);
-        if (!$moved) {
-            $moved = copy($tmpName, $elfPath);
-        }
-    }
-    if (!$moved) {
-        $message = 'failed to store uploaded ELF';
+    if (!pkg_store_uploaded_elf($file, $elfPath, $message)) {
         return false;
     }
-    @chmod($elfPath, 0644);
+
+    $now = gmdate('c');
+    $uploadedAt = ($existing !== null && isset($existing['uploaded_at']) && is_string($existing['uploaded_at']) &&
+                   $existing['uploaded_at'] !== '')
+                      ? $existing['uploaded_at']
+                      : $now;
 
     $meta = [
         'version' => $version,
         'target' => $target,
         'description' => $description,
+        'depends' => $depends,
+        'category' => $category,
+        'tags' => $tags,
         'owner' => $username,
-        'uploaded_at' => gmdate('c'),
+        'uploaded_at' => $uploadedAt,
+        'updated_at' => $now,
     ];
     if (!pkg_write_package_meta($dir, $meta)) {
         $message = 'failed to write package metadata';
@@ -485,6 +643,77 @@ function pkg_upload_package(string $repoDir, string $username, array &$outPackag
         $outPackage = $info;
     }
     $message = 'package uploaded';
+    return true;
+}
+
+function pkg_update_package(string $repoDir, string $username, array &$outPackage, string &$message): bool {
+    $outPackage = [];
+    if ($username === '') {
+        $message = 'login required';
+        return false;
+    }
+
+    $name = pkg_clean_line((string)($_POST['name'] ?? $_GET['name'] ?? ''), 63);
+    if (!pkg_valid_name($name)) {
+        $message = 'invalid package name';
+        return false;
+    }
+
+    $info = pkg_package_info($repoDir, $name);
+    if ($info === null) {
+        $message = 'package not found';
+        return false;
+    }
+    if (!pkg_user_can_edit_package($info, $username)) {
+        $message = 'only the package owner can update this package';
+        return false;
+    }
+
+    $version = pkg_post_field('version', (string)$info['version'], 64);
+    $target = pkg_post_field('target', (string)$info['target'], 160);
+    $description = pkg_post_field('description', (string)$info['description'], 512);
+    $depends = pkg_post_field('depends', (string)$info['depends'], 512);
+    $category = pkg_post_field('category', (string)$info['category'], 63);
+    $tags = pkg_post_field('tags', (string)$info['tags'], 256);
+    if ($target === '') {
+        $target = '/shell/' . $name . '.elf';
+    }
+
+    if (!pkg_validate_package_meta($name, $version, $target, $depends, $category, $tags, $message)) {
+        return false;
+    }
+
+    $dir = pkg_package_dir($repoDir, $name);
+    $elfPath = $dir . '/' . $name . '.elf';
+    $file = $_FILES['elf'] ?? null;
+    if (is_array($file) && isset($file['error']) && (int)$file['error'] !== UPLOAD_ERR_NO_FILE) {
+        if (!pkg_store_uploaded_elf($file, $elfPath, $message)) {
+            return false;
+        }
+    }
+
+    $now = gmdate('c');
+    $meta = [
+        'version' => $version,
+        'target' => $target,
+        'description' => $description,
+        'depends' => $depends,
+        'category' => $category,
+        'tags' => $tags,
+        'owner' => $username,
+        'uploaded_at' => (isset($info['uploaded_at']) && is_string($info['uploaded_at'])) ? $info['uploaded_at'] : '',
+        'updated_at' => $now,
+    ];
+    if (!pkg_write_package_meta($dir, $meta)) {
+        $message = 'failed to write package metadata';
+        return false;
+    }
+
+    $updated = pkg_package_info($repoDir, $name);
+    if ($updated !== null) {
+        $outPackage = $updated;
+    }
+    $message = 'package updated';
     return true;
 }
 
@@ -518,6 +747,28 @@ function pkg_api(string $repoDir, string $api): never {
         pkg_json([
             'ok' => true,
             'q' => pkg_clean_line($query, 128),
+            'count' => count($packages),
+            'packages' => $packages,
+        ]);
+    }
+
+    if ($api === 'category') {
+        $name = (string)($_GET['name'] ?? '');
+        $packages = pkg_filter_category_packages($repoDir, $name);
+        pkg_json([
+            'ok' => true,
+            'category' => pkg_clean_line($name, 63),
+            'count' => count($packages),
+            'packages' => $packages,
+        ]);
+    }
+
+    if ($api === 'tag') {
+        $name = (string)($_GET['name'] ?? '');
+        $packages = pkg_filter_tag_packages($repoDir, $name);
+        pkg_json([
+            'ok' => true,
+            'tag' => pkg_clean_line($name, 32),
             'count' => count($packages),
             'packages' => $packages,
         ]);
@@ -589,6 +840,23 @@ function pkg_api(string $repoDir, string $api): never {
         ]);
     }
 
+    if ($api === 'update') {
+        if (($_SERVER['REQUEST_METHOD'] ?? 'GET') !== 'POST') {
+            pkg_error_json('POST required', 405);
+        }
+        $message = '';
+        $package = [];
+        $ok = pkg_update_package($repoDir, pkg_current_username(), $package, $message);
+        if (!$ok) {
+            pkg_error_json($message, 400);
+        }
+        pkg_json([
+            'ok' => true,
+            'message' => $message,
+            'package' => $package,
+        ]);
+    }
+
     pkg_error_json('unknown api', 404);
 }
 
@@ -613,6 +881,10 @@ if (isset($_GET['register'])) {
     $view = 'login';
 } elseif (isset($_GET['upload'])) {
     $view = 'upload';
+} elseif (isset($_GET['edit'])) {
+    $view = 'edit';
+} elseif (isset($_GET['mine'])) {
+    $view = 'mine';
 }
 
 if (isset($_GET['logout'])) {
@@ -634,8 +906,16 @@ if ($view === 'upload' && ($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
     $messageOk = pkg_upload_package($repoDir, pkg_current_username(), $package, $message);
 }
 
+if ($view === 'edit' && ($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
+    $package = [];
+    $messageOk = pkg_update_package($repoDir, pkg_current_username(), $package, $message);
+}
+
 $currentUser = pkg_current_username();
 $packages = pkg_list_packages($repoDir);
+$editPackageName = isset($_GET['edit']) ? pkg_clean_line((string)$_GET['edit'], 63) : '';
+$editPackage = ($editPackageName !== '') ? pkg_package_info($repoDir, $editPackageName) : null;
+$myPackages = ($currentUser !== '') ? pkg_list_user_packages($repoDir, $currentUser) : [];
 ?><!doctype html>
 <html>
 <head>
@@ -657,6 +937,8 @@ logged in as <?php echo pkg_html($currentUser); ?>
 <a href="?logout=1">logout</a>
 -
 <a href="?upload=1">upload package</a>
+-
+<a href="?mine=1">my packages</a>
 <?php endif; ?>
 </p>
 <?php if ($message !== ''): ?>
@@ -686,9 +968,60 @@ logged in as <?php echo pkg_html($currentUser); ?>
 <p><label>Version <input name="version" value="1.0.0" required maxlength="64"></label></p>
 <p><label>Target <input name="target" placeholder="/shell/name.elf" maxlength="160"></label></p>
 <p><label>Description <input name="description" maxlength="512"></label></p>
+<p><label>Depends <input name="depends" placeholder="foo>=1.0.0,bar" maxlength="512"></label></p>
+<p><label>Category <input name="category" placeholder="network" maxlength="63"></label></p>
+<p><label>Tags <input name="tags" placeholder="gui,http,tool" maxlength="256"></label></p>
 <p><label>ELF file <input name="elf" type="file" required></label></p>
 <p><button type="submit">Upload</button></p>
 </form>
+<?php endif; ?>
+<?php elseif ($view === 'edit'): ?>
+<h2>Edit Package</h2>
+<?php if ($currentUser === ''): ?>
+<p>Login required.</p>
+<?php elseif ($editPackage === null): ?>
+<p>Package not found.</p>
+<?php elseif (!pkg_user_can_edit_package($editPackage, $currentUser)): ?>
+<p>Only the package owner can edit this package.</p>
+<?php else: ?>
+<form method="post" action="?edit=<?php echo rawurlencode((string)$editPackage['name']); ?>" enctype="multipart/form-data">
+<p><label>Name <input name="name" value="<?php echo pkg_html((string)$editPackage['name']); ?>" readonly></label></p>
+<p><label>Version <input name="version" value="<?php echo pkg_html((string)$editPackage['version']); ?>" required maxlength="64"></label></p>
+<p><label>Target <input name="target" value="<?php echo pkg_html((string)$editPackage['target']); ?>" maxlength="160"></label></p>
+<p><label>Description <input name="description" value="<?php echo pkg_html((string)$editPackage['description']); ?>" maxlength="512"></label></p>
+<p><label>Depends <input name="depends" value="<?php echo pkg_html((string)$editPackage['depends']); ?>" maxlength="512"></label></p>
+<p><label>Category <input name="category" value="<?php echo pkg_html((string)$editPackage['category']); ?>" maxlength="63"></label></p>
+<p><label>Tags <input name="tags" value="<?php echo pkg_html((string)$editPackage['tags']); ?>" maxlength="256"></label></p>
+<p><label>Replace ELF <input name="elf" type="file"></label></p>
+<p><button type="submit">Update Package</button></p>
+</form>
+<?php endif; ?>
+<?php elseif ($view === 'mine'): ?>
+<h2>My Packages</h2>
+<?php if ($currentUser === ''): ?>
+<p>Login required.</p>
+<?php elseif (count($myPackages) === 0): ?>
+<p>No packages owned by this account.</p>
+<?php else: ?>
+<table border="1" cellpadding="4" cellspacing="0">
+<tr><th>Name</th><th>Version</th><th>Category</th><th>Tags</th><th>Description</th><th>Links</th></tr>
+<?php foreach ($myPackages as $package): ?>
+<tr>
+<td><?php echo pkg_html((string)$package['name']); ?></td>
+<td><?php echo pkg_html((string)$package['version']); ?></td>
+<td><?php echo pkg_html((string)$package['category']); ?></td>
+<td><?php echo pkg_html((string)$package['tags']); ?></td>
+<td><?php echo pkg_html((string)$package['description']); ?></td>
+<td>
+<a href="?edit=<?php echo rawurlencode((string)$package['name']); ?>">edit</a>
+-
+<a href="?api=info&amp;name=<?php echo rawurlencode((string)$package['name']); ?>">info</a>
+-
+<a href="?download=<?php echo rawurlencode((string)$package['name']); ?>">download</a>
+</td>
+</tr>
+<?php endforeach; ?>
+</table>
 <?php endif; ?>
 <?php else: ?>
 <p>Client usage: pkg repo <?php echo pkg_html(pkg_base_url()); ?></p>
@@ -698,18 +1031,23 @@ logged in as <?php echo pkg_html($currentUser); ?>
 <li><a href="?api=list">?api=list</a></li>
 <li><a href="?api=info&amp;name=hello">?api=info&amp;name=hello</a></li>
 <li><a href="?api=search&amp;q=hello">?api=search&amp;q=hello</a></li>
+<li><a href="?api=category&amp;name=network">?api=category&amp;name=network</a></li>
+<li><a href="?api=tag&amp;name=gui">?api=tag&amp;name=gui</a></li>
 <li><a href="?api=me">?api=me</a></li>
+<li>POST ?api=update</li>
 </ul>
 <h2>Packages</h2>
 <?php if (count($packages) === 0): ?>
 <p>No packages.</p>
 <?php else: ?>
 <table border="1" cellpadding="4" cellspacing="0">
-<tr><th>Name</th><th>Version</th><th>Owner</th><th>Description</th><th>Links</th></tr>
+<tr><th>Name</th><th>Version</th><th>Category</th><th>Tags</th><th>Owner</th><th>Description</th><th>Links</th></tr>
 <?php foreach ($packages as $package): ?>
 <tr>
 <td><?php echo pkg_html((string)$package['name']); ?></td>
 <td><?php echo pkg_html((string)$package['version']); ?></td>
+<td><?php echo pkg_html((string)$package['category']); ?></td>
+<td><?php echo pkg_html((string)$package['tags']); ?></td>
 <td><?php echo pkg_html((string)$package['owner']); ?></td>
 <td><?php echo pkg_html((string)$package['description']); ?></td>
 <td>
@@ -718,6 +1056,10 @@ logged in as <?php echo pkg_html($currentUser); ?>
 <a href="?manifest=<?php echo rawurlencode((string)$package['name']); ?>">manifest</a>
 -
 <a href="?download=<?php echo rawurlencode((string)$package['name']); ?>">download</a>
+<?php if ($currentUser !== '' && pkg_user_can_edit_package($package, $currentUser)): ?>
+-
+<a href="?edit=<?php echo rawurlencode((string)$package['name']); ?>">edit</a>
+<?php endif; ?>
 </td>
 </tr>
 <?php endforeach; ?>
