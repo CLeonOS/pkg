@@ -524,6 +524,8 @@ int pkg_record_install(const pkg_manifest *manifest, const char *source) {
 
 int pkg_install_elf_file(const pkg_manifest *manifest, const char *elf_path, const char *source) {
     char actual_sha256[PKG_SHA256_MAX];
+    u64 db_len = 0ULL;
+    char installed_version[PKG_VERSION_MAX];
 
     if (manifest == (const pkg_manifest *)0 || elf_path == (const char *)0) {
         return 0;
@@ -531,6 +533,15 @@ int pkg_install_elf_file(const pkg_manifest *manifest, const char *elf_path, con
 
     if (pkg_target_is_allowed(manifest->target) == 0) {
         (void)puts("pkg: invalid install target, only /shell/*.elf is allowed");
+        return 0;
+    }
+
+    if (pkg_force_reinstall == 0 &&
+        pkg_read_file(PKG_DB_PATH, pkg_db_buf, (u64)sizeof(pkg_db_buf), &db_len) != 0 &&
+        pkg_find_installed_version_text(pkg_db_buf, manifest->name, installed_version,
+                                        (u64)sizeof(installed_version)) != 0) {
+        (void)printf("pkg: %s is already installed; use pkg install --reinstall %s\n", manifest->name,
+                     manifest->name);
         return 0;
     }
 

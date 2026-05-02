@@ -7,12 +7,15 @@
 ```sh
 pkg install <name>
 pkg install --dry-run <name>
+pkg install --reinstall <name>
+pkg reinstall <name>
 pkg install /path/to/app.elf
 pkg install /path/to/app.clpkg
 pkg install http://host/path/app.clpkg
 pkg install http://host/path/app.elf
 pkg list
 pkg info <name>
+pkg files <name>
 pkg remove <name>
 pkg remove --force <name>
 pkg remote list
@@ -54,6 +57,8 @@ Safety and diagnostics:
 
 ```sh
 pkg install --dry-run hello
+pkg install --reinstall hello
+pkg files hello
 pkg doctor
 pkg verify
 pkg verify hello
@@ -62,6 +67,16 @@ pkg verify hello
 `pkg install --dry-run` resolves dependencies, target paths, download sizes when
 the repository provides them, and whether an install would overwrite an existing
 ELF. It does not write `/shell` or `/system/pkg/installed.db`.
+
+`pkg install --reinstall <name>` and `pkg reinstall <name>` force a fresh
+install of an already installed package. Normal `pkg install <name>` refuses to
+overwrite an installed package, so accidental reinstalls do not hide local
+damage or version drift.
+
+`pkg files <name>` lists files recorded for the package. Current packages record
+the primary ELF target, typically `/shell/<name>.elf`; the command is structured
+so future multi-file packages can add more entries without changing the user
+interface.
 
 Write operations use `/system/pkg/lock` to avoid concurrent installers changing
 `installed.db` or `/shell/*.elf` at the same time. Stale locks owned by exited

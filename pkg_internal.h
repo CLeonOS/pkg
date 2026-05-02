@@ -101,6 +101,7 @@ extern pkg_u8 pkg_copy_buf[PKG_COPY_CHUNK];
 extern char pkg_upgrade_names[PKG_UPGRADE_ALL_MAX][PKG_NAME_MAX];
 extern pkg_plan_item pkg_plan_items[PKG_DRY_RUN_MAX];
 extern u64 pkg_plan_count;
+extern int pkg_force_reinstall;
 
 int pkg_has_prefix(const char *text, const char *prefix);
 int pkg_has_suffix(const char *text, const char *suffix);
@@ -204,6 +205,7 @@ int pkg_remove_has_reverse_dependencies(const char *name);
 int pkg_cmd_remove(const char *arg);
 int pkg_cmd_repo(const char *arg);
 int pkg_cmd_info(const char *arg);
+int pkg_cmd_files(const char *arg);
 void pkg_print_remote_header(void);
 void pkg_print_remote_line(const pkg_remote_package *package);
 int pkg_cmd_remote_list(void);

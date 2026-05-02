@@ -4,15 +4,25 @@ int pkg_cmd_install(const ush_state *sh, const char *arg) {
     char first[PKG_URL_MAX];
     const char *rest = "";
     int ok;
+    int reinstall = 0;
 
     if (sh == (const ush_state *)0 || arg == (const char *)0 ||
         ush_split_first_and_rest(arg, first, (u64)sizeof(first), &rest) == 0 || first[0] == '\0') {
-        (void)puts("usage: pkg install [--dry-run] <name|file.elf|file.clpkg|url>");
+        (void)puts("usage: pkg install [--dry-run] [--reinstall] <name|file.elf|file.clpkg|url>");
         return 0;
     }
 
     if (ush_streq(first, "--dry-run") != 0 || ush_streq(first, "-n") != 0) {
         return pkg_cmd_install_dry_run(sh, rest);
+    }
+
+    if (ush_streq(first, "--reinstall") != 0 || ush_streq(first, "--force-reinstall") != 0) {
+        reinstall = 1;
+        if (rest == (const char *)0 ||
+            ush_split_first_and_rest(rest, first, (u64)sizeof(first), &rest) == 0 || first[0] == '\0') {
+            (void)puts("usage: pkg install --reinstall <name|file.elf|file.clpkg|url>");
+            return 0;
+        }
     }
 
     if (rest != (const char *)0 && rest[0] != '\0') {
@@ -24,24 +34,29 @@ int pkg_cmd_install(const ush_state *sh, const char *arg) {
         return 0;
     }
 
+    pkg_force_reinstall = reinstall;
     if (pkg_is_url(first) != 0) {
         if (pkg_has_suffix(first, ".elf") != 0) {
             ok = pkg_install_url_elf(first);
+            pkg_force_reinstall = 0;
             pkg_lock_release();
             return ok;
         }
         (void)printf("pkg: download manifest %s\n", first);
         if (pkg_download_to(first, PKG_TMP_MANIFEST) == 0) {
+            pkg_force_reinstall = 0;
             pkg_lock_release();
             return 0;
         }
         ok = pkg_install_manifest_file(sh, PKG_TMP_MANIFEST, first, 1);
+        pkg_force_reinstall = 0;
         pkg_lock_release();
         return ok;
     }
 
     if (pkg_has_suffix(first, ".elf") != 0) {
         ok = pkg_install_local_elf(sh, first);
+        pkg_force_reinstall = 0;
         pkg_lock_release();
         return ok;
     }
@@ -50,10 +65,12 @@ int pkg_cmd_install(const ush_state *sh, const char *arg) {
         char manifest_abs[USH_PATH_MAX];
         if (pkg_resolve_local_path(sh, first, manifest_abs, (u64)sizeof(manifest_abs)) == 0) {
             (void)puts("pkg: invalid manifest path");
+            pkg_force_reinstall = 0;
             pkg_lock_release();
             return 0;
         }
         ok = pkg_install_manifest_file(sh, manifest_abs, manifest_abs, 0);
+        pkg_force_reinstall = 0;
         pkg_lock_release();
         return ok;
     }
@@ -62,6 +79,7 @@ int pkg_cmd_install(const ush_state *sh, const char *arg) {
         pkg_dependency dep;
         if (pkg_parse_dependency_spec(first, &dep) != 0 && dep.op[0] != '\0') {
             ok = pkg_install_repo_package_with_depth(sh, dep.name, dep.op, dep.version, 0ULL);
+            pkg_force_reinstall = 0;
             pkg_lock_release();
             return ok;
         }
@@ -69,11 +87,13 @@ int pkg_cmd_install(const ush_state *sh, const char *arg) {
 
     if (pkg_safe_name(first) != 0) {
         ok = pkg_install_repo_package(sh, first);
+        pkg_force_reinstall = 0;
         pkg_lock_release();
         return ok;
     }
 
     (void)puts("pkg: invalid package source");
+    pkg_force_reinstall = 0;
     pkg_lock_release();
     return 0;
 }
@@ -395,6 +415,67 @@ int pkg_cmd_info(const char *arg) {
             (void)printf("source: %s\n", source);
             if (depends[0] != '\0') {
                 (void)printf("depends: %s\n", depends);
+            }
+            return 1;
+        }
+
+        line = next;
+    }
+
+    (void)puts("pkg: package not installed");
+    return 0;
+}
+
+int pkg_cmd_files(const char *arg) {
+    char name[PKG_NAME_MAX];
+    const char *rest = "";
+    u64 len = 0ULL;
+    char *line;
+
+    if (arg == (const char *)0 || ush_split_first_and_rest(arg, name, (u64)sizeof(name), &rest) == 0 ||
+        pkg_safe_name(name) == 0) {
+        (void)puts("usage: pkg files <name>");
+        return 0;
+    }
+
+    if (rest != (const char *)0 && rest[0] != '\0') {
+        (void)puts("pkg: files accepts exactly one package name");
+        return 0;
+    }
+
+    if (pkg_read_file(PKG_DB_PATH, pkg_db_buf, (u64)sizeof(pkg_db_buf), &len) == 0 || len == 0ULL) {
+        (void)puts("pkg: package not installed");
+        return 0;
+    }
+
+    line = pkg_db_buf;
+    while (*line != '\0') {
+        char *next = line;
+        char copy[PKG_DB_LINE_MAX];
+        char *pkg_name;
+        char *version;
+        char *target;
+
+        while (*next != '\0' && *next != '\n') {
+            next++;
+        }
+        if (*next == '\n') {
+            *next = '\0';
+            next++;
+        }
+
+        ush_copy(copy, (u64)sizeof(copy), line);
+        if (pkg_db_line_parse(copy, &pkg_name, &version, &target, (char **)0, (char **)0) != 0 &&
+            ush_streq(pkg_name, name) != 0) {
+            (void)printf("%s %s files:\n", pkg_name, version);
+            if (target[0] != '\0') {
+                (void)printf("  %s", target);
+                if (cleonos_sys_fs_stat_type(target) == 1ULL) {
+                    (void)printf(" (%llu bytes)", (unsigned long long)cleonos_sys_fs_stat_size(target));
+                } else {
+                    (void)printf(" (missing)");
+                }
+                (void)puts("");
             }
             return 1;
         }
@@ -796,9 +877,11 @@ int pkg_cmd_upgrade(const ush_state *sh, const char *arg) {
                 ok = 0;
                 continue;
             }
+            pkg_force_reinstall = 1;
             if (pkg_install_repo_package(sh, pkg_upgrade_names[i]) == 0) {
                 ok = 0;
             }
+            pkg_force_reinstall = 0;
             pkg_lock_release();
         }
         return ok;
@@ -819,17 +902,21 @@ int pkg_cmd_upgrade(const ush_state *sh, const char *arg) {
     if (pkg_lock_acquire() == 0) {
         return 0;
     }
+    pkg_force_reinstall = 1;
     ok = pkg_install_repo_package(sh, name);
+    pkg_force_reinstall = 0;
     pkg_lock_release();
     return ok;
 }
 
 void pkg_usage(void) {
     (void)puts("usage:");
-    (void)puts("  pkg install [--dry-run] <name|file.elf|file.clpkg|url>");
+    (void)puts("  pkg install [--dry-run] [--reinstall] <name|file.elf|file.clpkg|url>");
+    (void)puts("  pkg reinstall <name>");
     (void)puts("  pkg list");
     (void)puts("  pkg remove [--force] <name>");
     (void)puts("  pkg info <name>");
+    (void)puts("  pkg files <name>");
     (void)puts("  pkg remote list");
     (void)puts("  pkg remote info <name>");
     (void)puts("  pkg search <keyword>");
@@ -862,6 +949,16 @@ int pkg_run(const ush_state *sh, const char *arg) {
     if (ush_streq(cmd, "install") != 0 || ush_streq(cmd, "add") != 0) {
         return pkg_cmd_install(sh, rest);
     }
+    if (ush_streq(cmd, "reinstall") != 0) {
+        char reinstall_arg[PKG_ARG_MAX];
+        int n = snprintf(reinstall_arg, (usize)sizeof(reinstall_arg), "--reinstall %s",
+                         (rest != (const char *)0) ? rest : "");
+        if (n <= 0 || (u64)n >= (u64)sizeof(reinstall_arg)) {
+            (void)puts("pkg: reinstall argument too long");
+            return 0;
+        }
+        return pkg_cmd_install(sh, reinstall_arg);
+    }
     if (ush_streq(cmd, "list") != 0 || ush_streq(cmd, "ls") != 0) {
         return pkg_cmd_list();
     }
@@ -873,6 +970,9 @@ int pkg_run(const ush_state *sh, const char *arg) {
     }
     if (ush_streq(cmd, "info") != 0 || ush_streq(cmd, "show") != 0) {
         return pkg_cmd_info(rest);
+    }
+    if (ush_streq(cmd, "files") != 0) {
+        return pkg_cmd_files(rest);
     }
     if (ush_streq(cmd, "remote") != 0) {
         return pkg_cmd_remote(rest);
