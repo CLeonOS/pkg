@@ -16,6 +16,12 @@ pkg install http://host/path/app.elf
 pkg list
 pkg info <name>
 pkg files <name>
+pkg repo
+pkg repo http://10.0.2.2/pkg/index.php
+pkg repo list
+pkg repo add main http://10.0.2.2/pkg/index.php
+pkg repo use main
+pkg repo remove main
 pkg remove <name>
 pkg remove --force <name>
 pkg remote list
@@ -28,8 +34,7 @@ pkg upgrade <name>
 pkg upgrade --all
 pkg doctor
 pkg verify [name]
-pkg repo
-pkg repo http://10.0.2.2/pkg/index.php
+pkg clean
 ```
 
 Installed applications are copied to `/shell/<name>.elf` by default and are
@@ -44,6 +49,20 @@ pkg search hello
 pkg category network
 pkg tag gui
 ```
+
+Named repositories are managed by the same `pkg repo` command:
+
+```sh
+pkg repo add main http://10.0.2.2:8000/index.php
+pkg repo list
+pkg repo use main
+pkg repo remove main
+```
+
+Named repositories are stored in `/system/pkg/sources.db`. The active repository
+is still stored in `/system/pkg/repo.conf`, so existing install/search/update
+commands continue to use the same repository path. `pkg source ...` remains as a
+compatibility alias for `pkg repo ...`.
 
 Update commands compare local installed versions against the remote repository:
 
@@ -62,6 +81,7 @@ pkg files hello
 pkg doctor
 pkg verify
 pkg verify hello
+pkg clean
 ```
 
 `pkg install --dry-run` resolves dependencies, target paths, download sizes when
@@ -90,6 +110,20 @@ disk capacity and uses write probes instead of an exact free-byte check.
 `pkg verify [name]` checks `installed.db`, verifies that installed ELF targets
 still exist, and compares SHA-256 when a checksum was recorded. Older
 installations without a recorded checksum report a warning instead of failing.
+
+`pkg clean` removes package-manager temporary files:
+
+```text
+/temp/p.clpkg
+/temp/p.elf
+/temp/pkg_api.json
+/temp/.ush_cmd_ctx.bin
+/temp/.ush_cmd_ret.bin
+/system/pkg/lock
+```
+
+If `/system/pkg/lock` belongs to a still-running process, `pkg clean` refuses to
+run so it does not delete files from an active install.
 
 ## Manifest Format
 

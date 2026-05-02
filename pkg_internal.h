@@ -12,6 +12,7 @@
 #define PKG_DB_PATH "/system/pkg/installed.db"
 #define PKG_LOCK_PATH "/system/pkg/lock"
 #define PKG_REPO_PATH "/system/pkg/repo.conf"
+#define PKG_SOURCES_PATH "/system/pkg/sources.db"
 #define PKG_DEFAULT_REPO "http://clospkg.ecuil.com"
 #define PKG_TMP_MANIFEST "/temp/p.clpkg"
 #define PKG_TMP_ELF "/temp/p.elf"
@@ -204,6 +205,8 @@ int pkg_remove_record(const char *name, char *out_target, u64 out_target_size, i
 int pkg_remove_has_reverse_dependencies(const char *name);
 int pkg_cmd_remove(const char *arg);
 int pkg_cmd_repo(const char *arg);
+int pkg_cmd_source(const char *arg);
+int pkg_cmd_clean(void);
 int pkg_cmd_info(const char *arg);
 int pkg_cmd_files(const char *arg);
 void pkg_print_remote_header(void);

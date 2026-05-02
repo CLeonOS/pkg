@@ -336,23 +336,15 @@ int pkg_cmd_remove(const char *arg) {
     return ok;
 }
 
-int pkg_cmd_repo(const char *arg) {
+static int pkg_repo_set_active(const char *url) {
     char repo[PKG_URL_MAX];
-
-    if (arg == (const char *)0 || arg[0] == '\0') {
-        if (pkg_load_repo(repo, (u64)sizeof(repo)) == 0) {
-            return 0;
-        }
-        (void)printf("pkg: repo %s\n", repo);
-        return 1;
-    }
 
     if (pkg_ensure_db_dir() == 0) {
         (void)puts("pkg: cannot create /system/pkg");
         return 0;
     }
 
-    pkg_copy_trimmed(repo, (u64)sizeof(repo), arg);
+    pkg_copy_trimmed(repo, (u64)sizeof(repo), url);
     if (repo[0] == '\0' || (pkg_is_url(repo) == 0 && strstr(repo, "%s") == (char *)0)) {
         (void)puts("pkg: repo must be http(s) URL or URL template containing %s");
         return 0;
@@ -364,6 +356,353 @@ int pkg_cmd_repo(const char *arg) {
     }
 
     (void)printf("pkg: repo set to %s\n", repo);
+    return 1;
+}
+
+static int pkg_source_find(const char *name, char *out_url, u64 out_url_size) {
+    u64 len = 0ULL;
+    char *line;
+
+    if (out_url != (char *)0 && out_url_size > 0ULL) {
+        out_url[0] = '\0';
+    }
+    if (name == (const char *)0 || pkg_safe_name(name) == 0) {
+        return 0;
+    }
+    if (pkg_read_file(PKG_SOURCES_PATH, pkg_db_buf, (u64)sizeof(pkg_db_buf), &len) == 0 || len == 0ULL) {
+        return 0;
+    }
+
+    line = pkg_db_buf;
+    while (*line != '\0') {
+        char *next = line;
+        char copy[PKG_DB_LINE_MAX];
+        char *url;
+
+        while (*next != '\0' && *next != '\n') {
+            next++;
+        }
+        if (*next == '\n') {
+            *next = '\0';
+            next++;
+        }
+
+        if (line[0] != '\0') {
+            ush_copy(copy, (u64)sizeof(copy), line);
+            url = strchr(copy, '|');
+            if (url != (char *)0) {
+                *url = '\0';
+                url++;
+                if (ush_streq(copy, name) != 0) {
+                    if (out_url != (char *)0 && out_url_size > 0ULL) {
+                        ush_copy(out_url, out_url_size, url);
+                    }
+                    return 1;
+                }
+            }
+        }
+        line = next;
+    }
+    return 0;
+}
+
+static int pkg_source_write_or_remove(const char *target_name, const char *new_url, int remove) {
+    u64 len = 0ULL;
+    u64 new_len = 0ULL;
+    char *line;
+    int replaced = 0;
+
+    if (target_name == (const char *)0 || pkg_safe_name(target_name) == 0) {
+        return 0;
+    }
+    if (pkg_ensure_db_dir() == 0) {
+        (void)puts("pkg: cannot create /system/pkg");
+        return 0;
+    }
+
+    if (pkg_read_file(PKG_SOURCES_PATH, pkg_db_buf, (u64)sizeof(pkg_db_buf), &len) == 0) {
+        pkg_db_buf[0] = '\0';
+    }
+    (void)len;
+
+    pkg_db_new_buf[0] = '\0';
+    line = pkg_db_buf;
+    while (*line != '\0') {
+        char *next = line;
+        char copy[PKG_DB_LINE_MAX];
+        char *url;
+
+        while (*next != '\0' && *next != '\n') {
+            next++;
+        }
+        if (*next == '\n') {
+            *next = '\0';
+            next++;
+        }
+
+        if (line[0] != '\0') {
+            ush_copy(copy, (u64)sizeof(copy), line);
+            url = strchr(copy, '|');
+            if (url != (char *)0) {
+                *url = '\0';
+            }
+            if (ush_streq(copy, target_name) != 0) {
+                replaced = 1;
+                if (remove == 0) {
+                    if (pkg_append_text(pkg_db_new_buf, (u64)sizeof(pkg_db_new_buf), &new_len, target_name) == 0 ||
+                        pkg_append_char(pkg_db_new_buf, (u64)sizeof(pkg_db_new_buf), &new_len, '|') == 0 ||
+                        pkg_append_text(pkg_db_new_buf, (u64)sizeof(pkg_db_new_buf), &new_len, new_url) == 0 ||
+                        pkg_append_char(pkg_db_new_buf, (u64)sizeof(pkg_db_new_buf), &new_len, '\n') == 0) {
+                        return 0;
+                    }
+                }
+            } else if (url != (char *)0) {
+                if (pkg_append_text(pkg_db_new_buf, (u64)sizeof(pkg_db_new_buf), &new_len, line) == 0 ||
+                    pkg_append_char(pkg_db_new_buf, (u64)sizeof(pkg_db_new_buf), &new_len, '\n') == 0) {
+                    return 0;
+                }
+            }
+        }
+        line = next;
+    }
+
+    if (remove == 0 && replaced == 0) {
+        if (pkg_append_text(pkg_db_new_buf, (u64)sizeof(pkg_db_new_buf), &new_len, target_name) == 0 ||
+            pkg_append_char(pkg_db_new_buf, (u64)sizeof(pkg_db_new_buf), &new_len, '|') == 0 ||
+            pkg_append_text(pkg_db_new_buf, (u64)sizeof(pkg_db_new_buf), &new_len, new_url) == 0 ||
+            pkg_append_char(pkg_db_new_buf, (u64)sizeof(pkg_db_new_buf), &new_len, '\n') == 0) {
+            return 0;
+        }
+    }
+
+    return pkg_write_file(PKG_SOURCES_PATH, pkg_db_new_buf, new_len);
+}
+
+static int pkg_source_list(void) {
+    char active[PKG_URL_MAX];
+    u64 len = 0ULL;
+    char *line;
+    int any = 0;
+
+    if (pkg_load_repo(active, (u64)sizeof(active)) == 0) {
+        active[0] = '\0';
+    }
+    if (pkg_read_file(PKG_SOURCES_PATH, pkg_db_buf, (u64)sizeof(pkg_db_buf), &len) == 0 || len == 0ULL) {
+        (void)puts("pkg: no named sources");
+        if (active[0] != '\0') {
+            (void)printf("* current %s\n", active);
+        }
+        return 1;
+    }
+
+    (void)puts("name               active  url");
+    (void)puts("------------------------------------------------------------");
+    line = pkg_db_buf;
+    while (*line != '\0') {
+        char *next = line;
+        char copy[PKG_DB_LINE_MAX];
+        char *url;
+
+        while (*next != '\0' && *next != '\n') {
+            next++;
+        }
+        if (*next == '\n') {
+            *next = '\0';
+            next++;
+        }
+
+        if (line[0] != '\0') {
+            ush_copy(copy, (u64)sizeof(copy), line);
+            url = strchr(copy, '|');
+            if (url != (char *)0) {
+                *url = '\0';
+                url++;
+                (void)printf("%-18s %-7s %s\n", copy, ush_streq(url, active) != 0 ? "*" : "", url);
+                any = 1;
+            }
+        }
+        line = next;
+    }
+
+    if (any == 0) {
+        (void)puts("pkg: no named sources");
+    }
+    return 1;
+}
+
+int pkg_cmd_repo(const char *arg) {
+    char subcmd[32];
+    const char *rest = "";
+
+    if (arg == (const char *)0 || arg[0] == '\0') {
+        char repo[PKG_URL_MAX];
+        if (pkg_load_repo(repo, (u64)sizeof(repo)) == 0) {
+            return 0;
+        }
+        (void)printf("pkg: repo %s\n", repo);
+        return 1;
+    }
+
+    if (ush_split_first_and_rest(arg, subcmd, (u64)sizeof(subcmd), &rest) == 0 || subcmd[0] == '\0') {
+        (void)puts("usage: pkg repo [url] | list | add <name> <url> | use <name> | remove <name>");
+        return 0;
+    }
+
+    if (pkg_is_url(subcmd) != 0 || strstr(subcmd, "%s") != (char *)0) {
+        if (rest != (const char *)0 && rest[0] != '\0') {
+            (void)puts("pkg: repo URL does not accept extra arguments");
+            return 0;
+        }
+        return pkg_repo_set_active(subcmd);
+    }
+
+    if (ush_streq(subcmd, "list") != 0 || ush_streq(subcmd, "ls") != 0) {
+        if (rest != (const char *)0 && rest[0] != '\0') {
+            (void)puts("pkg: repo list does not accept arguments");
+            return 0;
+        }
+        return pkg_source_list();
+    }
+
+    if (ush_streq(subcmd, "add") != 0) {
+        char name[PKG_NAME_MAX];
+        char url[PKG_URL_MAX];
+        const char *tail = "";
+
+        if (rest == (const char *)0 ||
+            ush_split_first_and_rest(rest, name, (u64)sizeof(name), &rest) == 0 ||
+            ush_split_first_and_rest(rest, url, (u64)sizeof(url), &tail) == 0 || pkg_safe_name(name) == 0 ||
+            url[0] == '\0') {
+            (void)puts("usage: pkg repo add <name> <url>");
+            return 0;
+        }
+        if (tail != (const char *)0 && tail[0] != '\0') {
+            (void)puts("pkg: repo add accepts name and url");
+            return 0;
+        }
+        if (pkg_is_url(url) == 0 && strstr(url, "%s") == (char *)0) {
+            (void)puts("pkg: repo URL must be http(s) URL or URL template containing %s");
+            return 0;
+        }
+        if (pkg_source_write_or_remove(name, url, 0) == 0) {
+            (void)puts("pkg: repo source write failed");
+            return 0;
+        }
+        (void)printf("pkg: repo source %s set to %s\n", name, url);
+        return 1;
+    }
+
+    if (ush_streq(subcmd, "use") != 0) {
+        char name[PKG_NAME_MAX];
+        char url[PKG_URL_MAX];
+        const char *tail = "";
+
+        if (rest == (const char *)0 ||
+            ush_split_first_and_rest(rest, name, (u64)sizeof(name), &tail) == 0 || pkg_safe_name(name) == 0 ||
+            (tail != (const char *)0 && tail[0] != '\0')) {
+            (void)puts("usage: pkg repo use <name>");
+            return 0;
+        }
+        if (pkg_source_find(name, url, (u64)sizeof(url)) == 0) {
+            (void)puts("pkg: repo source not found");
+            return 0;
+        }
+        if (pkg_repo_set_active(url) == 0) {
+            return 0;
+        }
+        (void)printf("pkg: repo source %s active\n", name);
+        return 1;
+    }
+
+    if (ush_streq(subcmd, "remove") != 0 || ush_streq(subcmd, "rm") != 0) {
+        char name[PKG_NAME_MAX];
+        char url[PKG_URL_MAX];
+        char active[PKG_URL_MAX];
+        const char *tail = "";
+
+        if (rest == (const char *)0 ||
+            ush_split_first_and_rest(rest, name, (u64)sizeof(name), &tail) == 0 || pkg_safe_name(name) == 0 ||
+            (tail != (const char *)0 && tail[0] != '\0')) {
+            (void)puts("usage: pkg repo remove <name>");
+            return 0;
+        }
+        if (pkg_source_find(name, url, (u64)sizeof(url)) == 0) {
+            (void)puts("pkg: repo source not found");
+            return 0;
+        }
+        if (pkg_source_write_or_remove(name, (const char *)0, 1) == 0) {
+            (void)puts("pkg: repo source remove failed");
+            return 0;
+        }
+        if (pkg_load_repo(active, (u64)sizeof(active)) != 0 && ush_streq(active, url) != 0) {
+            (void)cleonos_sys_fs_remove(PKG_REPO_PATH);
+            (void)puts("pkg: removed active repo source; repo reset to default");
+        }
+        (void)printf("pkg: repo source %s removed\n", name);
+        return 1;
+    }
+
+    (void)puts("usage: pkg repo [url] | list | add <name> <url> | use <name> | remove <name>");
+    return 0;
+}
+
+int pkg_cmd_source(const char *arg) {
+    return pkg_cmd_repo(arg);
+}
+
+static int pkg_remove_if_file(const char *path) {
+    if (path == (const char *)0 || path[0] == '\0') {
+        return 0;
+    }
+    if (cleonos_sys_fs_stat_type(path) != 1ULL) {
+        return 0;
+    }
+    if (cleonos_sys_fs_remove(path) == 0ULL) {
+        (void)printf("pkg: failed to remove %s\n", path);
+        return 0;
+    }
+    (void)printf("pkg: removed %s\n", path);
+    return 1;
+}
+
+static int pkg_lock_is_active(void) {
+    char old_lock[64];
+    char *trimmed;
+    u64 len = 0ULL;
+    u64 pid = 0ULL;
+    cleonos_proc_snapshot snap;
+
+    if (pkg_read_file(PKG_LOCK_PATH, old_lock, (u64)sizeof(old_lock), &len) == 0 || len == 0ULL) {
+        return 0;
+    }
+    trimmed = pkg_trim_mut(old_lock);
+    if (ush_parse_u64_dec(trimmed, &pid) == 0 || pid == 0ULL) {
+        return 0;
+    }
+    if (cleonos_sys_proc_snapshot(pid, &snap, (u64)sizeof(snap)) == 0ULL) {
+        return 0;
+    }
+    return (snap.state != CLEONOS_PROC_STATE_EXITED && snap.state != CLEONOS_PROC_STATE_UNUSED) ? 1 : 0;
+}
+
+int pkg_cmd_clean(void) {
+    int removed = 0;
+
+    if (pkg_lock_is_active() != 0) {
+        (void)puts("pkg: lock is active; refusing to clean pkg temp files");
+        return 0;
+    }
+
+    removed += pkg_remove_if_file(PKG_TMP_MANIFEST);
+    removed += pkg_remove_if_file(PKG_TMP_ELF);
+    removed += pkg_remove_if_file(PKG_TMP_API);
+    removed += pkg_remove_if_file(USH_CMD_CTX_PATH);
+    removed += pkg_remove_if_file(USH_CMD_RET_PATH);
+    removed += pkg_remove_if_file(PKG_LOCK_PATH);
+
+    if (removed == 0) {
+        (void)puts("pkg: nothing to clean");
+    }
     return 1;
 }
 
@@ -917,6 +1256,11 @@ void pkg_usage(void) {
     (void)puts("  pkg remove [--force] <name>");
     (void)puts("  pkg info <name>");
     (void)puts("  pkg files <name>");
+    (void)puts("  pkg repo [url]");
+    (void)puts("  pkg repo list");
+    (void)puts("  pkg repo add <name> <url>");
+    (void)puts("  pkg repo use <name>");
+    (void)puts("  pkg repo remove <name>");
     (void)puts("  pkg remote list");
     (void)puts("  pkg remote info <name>");
     (void)puts("  pkg search <keyword>");
@@ -927,7 +1271,7 @@ void pkg_usage(void) {
     (void)puts("  pkg upgrade --all");
     (void)puts("  pkg doctor");
     (void)puts("  pkg verify [name]");
-    (void)puts("  pkg repo [url]");
+    (void)puts("  pkg clean");
     (void)puts("");
     (void)puts("manifest keys: name, version, target, url/path/elf, description, depends, category, tags, sha256, deprecated");
 }
@@ -968,6 +1312,9 @@ int pkg_run(const ush_state *sh, const char *arg) {
     if (ush_streq(cmd, "repo") != 0) {
         return pkg_cmd_repo(rest);
     }
+    if (ush_streq(cmd, "source") != 0 || ush_streq(cmd, "sources") != 0) {
+        return pkg_cmd_source(rest);
+    }
     if (ush_streq(cmd, "info") != 0 || ush_streq(cmd, "show") != 0) {
         return pkg_cmd_info(rest);
     }
@@ -1005,6 +1352,13 @@ int pkg_run(const ush_state *sh, const char *arg) {
     }
     if (ush_streq(cmd, "verify") != 0) {
         return pkg_cmd_verify(rest);
+    }
+    if (ush_streq(cmd, "clean") != 0) {
+        if (rest != (const char *)0 && rest[0] != '\0') {
+            (void)puts("pkg: clean does not accept arguments");
+            return 0;
+        }
+        return pkg_cmd_clean();
     }
     if (ush_streq(cmd, "help") != 0) {
         pkg_usage();
