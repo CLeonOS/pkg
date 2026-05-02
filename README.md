@@ -6,6 +6,7 @@
 
 ```sh
 pkg install <name>
+pkg install --dry-run <name>
 pkg install /path/to/app.elf
 pkg install /path/to/app.clpkg
 pkg install http://host/path/app.clpkg
@@ -22,6 +23,8 @@ pkg tag <name>
 pkg update
 pkg upgrade <name>
 pkg upgrade --all
+pkg doctor
+pkg verify [name]
 pkg repo
 pkg repo http://10.0.2.2/pkg/index.php
 ```
@@ -46,6 +49,32 @@ pkg update
 pkg upgrade hello
 pkg upgrade --all
 ```
+
+Safety and diagnostics:
+
+```sh
+pkg install --dry-run hello
+pkg doctor
+pkg verify
+pkg verify hello
+```
+
+`pkg install --dry-run` resolves dependencies, target paths, download sizes when
+the repository provides them, and whether an install would overwrite an existing
+ELF. It does not write `/shell` or `/system/pkg/installed.db`.
+
+Write operations use `/system/pkg/lock` to avoid concurrent installers changing
+`installed.db` or `/shell/*.elf` at the same time. Stale locks owned by exited
+processes are ignored automatically.
+
+`pkg doctor` checks the network stack, repository API, `/system/pkg` and
+`/shell` write probes, `installed.db` parsing, and disk presence/mount status.
+The current kernel does not expose free-space accounting yet, so doctor reports
+disk capacity and uses write probes instead of an exact free-byte check.
+
+`pkg verify [name]` checks `installed.db`, verifies that installed ELF targets
+still exist, and compares SHA-256 when a checksum was recorded. Older
+installations without a recorded checksum report a warning instead of failing.
 
 ## Manifest Format
 
