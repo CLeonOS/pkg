@@ -21,6 +21,9 @@
 #define PKG_DEPENDS_MAX 256U
 #define PKG_CATEGORY_MAX 64U
 #define PKG_TAGS_MAX 128U
+#define PKG_SHA256_MAX 65U
+#define PKG_DEPRECATED_MAX 256U
+#define PKG_DB_LINE_MAX 1024U
 #define PKG_URL_MAX 384U
 #define PKG_TEXT_MAX 32768U
 #define PKG_COPY_CHUNK 4096U
@@ -28,6 +31,13 @@
 #define PKG_DEP_DEPTH_MAX 8U
 
 typedef unsigned char pkg_u8;
+
+typedef struct pkg_sha256_ctx {
+    pkg_u8 data[64];
+    unsigned int datalen;
+    u64 bitlen;
+    unsigned int state[8];
+} pkg_sha256_ctx;
 
 typedef struct pkg_manifest {
     char name[PKG_NAME_MAX];
@@ -39,6 +49,8 @@ typedef struct pkg_manifest {
     char depends[PKG_DEPENDS_MAX];
     char category[PKG_CATEGORY_MAX];
     char tags[PKG_TAGS_MAX];
+    char sha256[PKG_SHA256_MAX];
+    char deprecated[PKG_DEPRECATED_MAX];
 } pkg_manifest;
 
 typedef struct pkg_remote_package {
@@ -53,6 +65,8 @@ typedef struct pkg_remote_package {
     char owner[PKG_NAME_MAX];
     char manifest_url[PKG_URL_MAX];
     char download_url[PKG_URL_MAX];
+    char sha256[PKG_SHA256_MAX];
+    char deprecated[PKG_DEPRECATED_MAX];
 } pkg_remote_package;
 
 typedef struct pkg_dependency {
@@ -225,6 +239,49 @@ static char pkg_hex_digit(u64 value) {
         return (char)('0' + value);
     }
     return (char)('A' + (value - 10ULL));
+}
+
+static int pkg_hex_char_value(char ch) {
+    if (ch >= '0' && ch <= '9') {
+        return (int)(ch - '0');
+    }
+    if (ch >= 'a' && ch <= 'f') {
+        return (int)(ch - 'a' + 10);
+    }
+    if (ch >= 'A' && ch <= 'F') {
+        return (int)(ch - 'A' + 10);
+    }
+    return -1;
+}
+
+static int pkg_hex_digest_is_valid(const char *text) {
+    u64 i;
+
+    if (text == (const char *)0) {
+        return 0;
+    }
+
+    for (i = 0ULL; text[i] != '\0'; i++) {
+        if (i >= 64ULL || pkg_hex_char_value(text[i]) < 0) {
+            return 0;
+        }
+    }
+    return (i == 64ULL) ? 1 : 0;
+}
+
+static int pkg_hex_digest_equals(const char *left, const char *right) {
+    u64 i;
+
+    if (pkg_hex_digest_is_valid(left) == 0 || pkg_hex_digest_is_valid(right) == 0) {
+        return 0;
+    }
+
+    for (i = 0ULL; i < 64ULL; i++) {
+        if (pkg_hex_char_value(left[i]) != pkg_hex_char_value(right[i])) {
+            return 0;
+        }
+    }
+    return 1;
 }
 
 static int pkg_append_url_encoded(char *dst, u64 dst_size, u64 *io_len, const char *text) {
@@ -544,6 +601,191 @@ static int pkg_copy_file(const char *src, const char *dst) {
     return ok;
 }
 
+static unsigned int pkg_sha256_rotr(unsigned int value, unsigned int count) {
+    return (value >> count) | (value << (32U - count));
+}
+
+static unsigned int pkg_sha256_load_be32(const pkg_u8 *data) {
+    return ((unsigned int)data[0] << 24U) | ((unsigned int)data[1] << 16U) | ((unsigned int)data[2] << 8U) |
+           (unsigned int)data[3];
+}
+
+static void pkg_sha256_store_be32(unsigned int value, pkg_u8 *out) {
+    out[0] = (pkg_u8)((value >> 24U) & 0xFFU);
+    out[1] = (pkg_u8)((value >> 16U) & 0xFFU);
+    out[2] = (pkg_u8)((value >> 8U) & 0xFFU);
+    out[3] = (pkg_u8)(value & 0xFFU);
+}
+
+static void pkg_sha256_transform(pkg_sha256_ctx *ctx, const pkg_u8 data[64]) {
+    static const unsigned int k[64] = {
+        0x428A2F98U, 0x71374491U, 0xB5C0FBCFU, 0xE9B5DBA5U, 0x3956C25BU, 0x59F111F1U, 0x923F82A4U, 0xAB1C5ED5U,
+        0xD807AA98U, 0x12835B01U, 0x243185BEU, 0x550C7DC3U, 0x72BE5D74U, 0x80DEB1FEU, 0x9BDC06A7U, 0xC19BF174U,
+        0xE49B69C1U, 0xEFBE4786U, 0x0FC19DC6U, 0x240CA1CCU, 0x2DE92C6FU, 0x4A7484AAU, 0x5CB0A9DCU, 0x76F988DAU,
+        0x983E5152U, 0xA831C66DU, 0xB00327C8U, 0xBF597FC7U, 0xC6E00BF3U, 0xD5A79147U, 0x06CA6351U, 0x14292967U,
+        0x27B70A85U, 0x2E1B2138U, 0x4D2C6DFCU, 0x53380D13U, 0x650A7354U, 0x766A0ABBU, 0x81C2C92EU, 0x92722C85U,
+        0xA2BFE8A1U, 0xA81A664BU, 0xC24B8B70U, 0xC76C51A3U, 0xD192E819U, 0xD6990624U, 0xF40E3585U, 0x106AA070U,
+        0x19A4C116U, 0x1E376C08U, 0x2748774CU, 0x34B0BCB5U, 0x391C0CB3U, 0x4ED8AA4AU, 0x5B9CCA4FU, 0x682E6FF3U,
+        0x748F82EEU, 0x78A5636FU, 0x84C87814U, 0x8CC70208U, 0x90BEFFFAU, 0xA4506CEBU, 0xBEF9A3F7U, 0xC67178F2U,
+    };
+    unsigned int m[64];
+    unsigned int a;
+    unsigned int b;
+    unsigned int c;
+    unsigned int d;
+    unsigned int e;
+    unsigned int f;
+    unsigned int g;
+    unsigned int h;
+    unsigned int i;
+
+    for (i = 0U; i < 16U; i++) {
+        m[i] = pkg_sha256_load_be32(data + (i * 4U));
+    }
+    for (i = 16U; i < 64U; i++) {
+        unsigned int s0 = pkg_sha256_rotr(m[i - 15U], 7U) ^ pkg_sha256_rotr(m[i - 15U], 18U) ^ (m[i - 15U] >> 3U);
+        unsigned int s1 = pkg_sha256_rotr(m[i - 2U], 17U) ^ pkg_sha256_rotr(m[i - 2U], 19U) ^ (m[i - 2U] >> 10U);
+        m[i] = m[i - 16U] + s0 + m[i - 7U] + s1;
+    }
+
+    a = ctx->state[0];
+    b = ctx->state[1];
+    c = ctx->state[2];
+    d = ctx->state[3];
+    e = ctx->state[4];
+    f = ctx->state[5];
+    g = ctx->state[6];
+    h = ctx->state[7];
+
+    for (i = 0U; i < 64U; i++) {
+        unsigned int s1 = pkg_sha256_rotr(e, 6U) ^ pkg_sha256_rotr(e, 11U) ^ pkg_sha256_rotr(e, 25U);
+        unsigned int ch = (e & f) ^ ((~e) & g);
+        unsigned int temp1 = h + s1 + ch + k[i] + m[i];
+        unsigned int s0 = pkg_sha256_rotr(a, 2U) ^ pkg_sha256_rotr(a, 13U) ^ pkg_sha256_rotr(a, 22U);
+        unsigned int maj = (a & b) ^ (a & c) ^ (b & c);
+        unsigned int temp2 = s0 + maj;
+        h = g;
+        g = f;
+        f = e;
+        e = d + temp1;
+        d = c;
+        c = b;
+        b = a;
+        a = temp1 + temp2;
+    }
+
+    ctx->state[0] += a;
+    ctx->state[1] += b;
+    ctx->state[2] += c;
+    ctx->state[3] += d;
+    ctx->state[4] += e;
+    ctx->state[5] += f;
+    ctx->state[6] += g;
+    ctx->state[7] += h;
+}
+
+static void pkg_sha256_init(pkg_sha256_ctx *ctx) {
+    ctx->datalen = 0U;
+    ctx->bitlen = 0ULL;
+    ctx->state[0] = 0x6A09E667U;
+    ctx->state[1] = 0xBB67AE85U;
+    ctx->state[2] = 0x3C6EF372U;
+    ctx->state[3] = 0xA54FF53AU;
+    ctx->state[4] = 0x510E527FU;
+    ctx->state[5] = 0x9B05688CU;
+    ctx->state[6] = 0x1F83D9ABU;
+    ctx->state[7] = 0x5BE0CD19U;
+}
+
+static void pkg_sha256_update(pkg_sha256_ctx *ctx, const pkg_u8 *data, u64 len) {
+    u64 i;
+
+    for (i = 0ULL; i < len; i++) {
+        ctx->data[ctx->datalen] = data[i];
+        ctx->datalen++;
+        if (ctx->datalen == 64U) {
+            pkg_sha256_transform(ctx, ctx->data);
+            ctx->bitlen += 512ULL;
+            ctx->datalen = 0U;
+        }
+    }
+}
+
+static void pkg_sha256_final(pkg_sha256_ctx *ctx, pkg_u8 hash[32]) {
+    unsigned int i = ctx->datalen;
+    u64 bitlen;
+
+    if (ctx->datalen < 56U) {
+        ctx->data[i++] = 0x80U;
+        while (i < 56U) {
+            ctx->data[i++] = 0U;
+        }
+    } else {
+        ctx->data[i++] = 0x80U;
+        while (i < 64U) {
+            ctx->data[i++] = 0U;
+        }
+        pkg_sha256_transform(ctx, ctx->data);
+        for (i = 0U; i < 56U; i++) {
+            ctx->data[i] = 0U;
+        }
+    }
+
+    bitlen = ctx->bitlen + ((u64)ctx->datalen * 8ULL);
+    ctx->data[56] = (pkg_u8)((bitlen >> 56U) & 0xFFU);
+    ctx->data[57] = (pkg_u8)((bitlen >> 48U) & 0xFFU);
+    ctx->data[58] = (pkg_u8)((bitlen >> 40U) & 0xFFU);
+    ctx->data[59] = (pkg_u8)((bitlen >> 32U) & 0xFFU);
+    ctx->data[60] = (pkg_u8)((bitlen >> 24U) & 0xFFU);
+    ctx->data[61] = (pkg_u8)((bitlen >> 16U) & 0xFFU);
+    ctx->data[62] = (pkg_u8)((bitlen >> 8U) & 0xFFU);
+    ctx->data[63] = (pkg_u8)(bitlen & 0xFFU);
+    pkg_sha256_transform(ctx, ctx->data);
+
+    for (i = 0U; i < 8U; i++) {
+        pkg_sha256_store_be32(ctx->state[i], hash + (i * 4U));
+    }
+}
+
+static int pkg_sha256_file_hex(const char *path, char out_hex[PKG_SHA256_MAX]) {
+    pkg_sha256_ctx ctx;
+    pkg_u8 hash[32];
+    u64 fd;
+    u64 i;
+
+    if (path == (const char *)0 || out_hex == (char *)0) {
+        return 0;
+    }
+    out_hex[0] = '\0';
+
+    fd = cleonos_sys_fd_open(path, CLEONOS_O_RDONLY, 0ULL);
+    if (fd == (u64)-1) {
+        return 0;
+    }
+
+    pkg_sha256_init(&ctx);
+    for (;;) {
+        u64 got = cleonos_sys_fd_read(fd, pkg_copy_buf, (u64)sizeof(pkg_copy_buf));
+        if (got == (u64)-1) {
+            (void)cleonos_sys_fd_close(fd);
+            return 0;
+        }
+        if (got == 0ULL) {
+            break;
+        }
+        pkg_sha256_update(&ctx, pkg_copy_buf, got);
+    }
+    (void)cleonos_sys_fd_close(fd);
+
+    pkg_sha256_final(&ctx, hash);
+    for (i = 0ULL; i < 32ULL; i++) {
+        out_hex[i * 2ULL] = pkg_hex_digit(((u64)hash[i]) >> 4U);
+        out_hex[i * 2ULL + 1ULL] = pkg_hex_digit((u64)hash[i]);
+    }
+    out_hex[64] = '\0';
+    return 1;
+}
+
 static int pkg_file_has_elf_magic(const char *path) {
     u64 fd;
     pkg_u8 magic[4];
@@ -733,6 +975,10 @@ static int pkg_parse_manifest(char *text, pkg_manifest *out_manifest) {
                     pkg_copy_trimmed(out_manifest->category, (u64)sizeof(out_manifest->category), value);
                 } else if (ush_streq(key, "tags") != 0) {
                     pkg_copy_trimmed(out_manifest->tags, (u64)sizeof(out_manifest->tags), value);
+                } else if (ush_streq(key, "sha256") != 0 || ush_streq(key, "checksum") != 0) {
+                    pkg_copy_trimmed(out_manifest->sha256, (u64)sizeof(out_manifest->sha256), value);
+                } else if (ush_streq(key, "deprecated") != 0 || ush_streq(key, "deprecation") != 0) {
+                    pkg_copy_trimmed(out_manifest->deprecated, (u64)sizeof(out_manifest->deprecated), value);
                 }
             }
         }
@@ -964,6 +1210,8 @@ static int pkg_parse_remote_package_object(const char *start, const char *end, p
     (void)pkg_json_get_string(start, end, "owner", out->owner, (u64)sizeof(out->owner));
     (void)pkg_json_get_string(start, end, "manifest_url", out->manifest_url, (u64)sizeof(out->manifest_url));
     (void)pkg_json_get_string(start, end, "download_url", out->download_url, (u64)sizeof(out->download_url));
+    (void)pkg_json_get_string(start, end, "sha256", out->sha256, (u64)sizeof(out->sha256));
+    (void)pkg_json_get_string(start, end, "deprecated", out->deprecated, (u64)sizeof(out->deprecated));
     (void)pkg_json_get_number_text(start, end, "size", out->size, (u64)sizeof(out->size));
 
     if (out->version[0] == '\0') {
@@ -1223,7 +1471,7 @@ static int pkg_find_installed_version_text(const char *db_text, const char *name
     line = db_text;
     while (*line != '\0') {
         const char *next = line;
-        char copy[384];
+        char copy[PKG_DB_LINE_MAX];
         u64 len = 0ULL;
         char *version;
 
@@ -1280,6 +1528,37 @@ static int pkg_installed_dependency_satisfies(const pkg_dependency *dep) {
     return pkg_version_satisfies(installed_version, dep->op, dep->version);
 }
 
+static int pkg_dependency_list_mentions(const char *depends, const char *name) {
+    char list[PKG_DEPENDS_MAX];
+    char *item;
+
+    if (depends == (const char *)0 || depends[0] == '\0' || name == (const char *)0) {
+        return 0;
+    }
+
+    ush_copy(list, (u64)sizeof(list), depends);
+    item = list;
+    while (item != (char *)0 && *item != '\0') {
+        char *next = strchr(item, ',');
+        char *trimmed;
+        pkg_dependency dep;
+
+        if (next != (char *)0) {
+            *next = '\0';
+            next++;
+        }
+
+        trimmed = pkg_trim_mut(item);
+        if (trimmed[0] != '\0' && pkg_parse_dependency_spec(trimmed, &dep) != 0 && ush_streq(dep.name, name) != 0) {
+            return 1;
+        }
+
+        item = next;
+    }
+
+    return 0;
+}
+
 static int pkg_remote_dependency_can_satisfy(const pkg_dependency *dep) {
     pkg_remote_package package;
     u64 len = 0ULL;
@@ -1308,6 +1587,78 @@ static int pkg_remote_dependency_can_satisfy(const pkg_dependency *dep) {
         return 0;
     }
 
+    return 1;
+}
+
+static int pkg_db_line_parse(char *line, char **out_name, char **out_version, char **out_target, char **out_source,
+                             char **out_depends) {
+    char *version;
+    char *target;
+    char *source;
+    char *depends;
+
+    if (out_name != (char **)0) {
+        *out_name = (char *)0;
+    }
+    if (out_version != (char **)0) {
+        *out_version = (char *)0;
+    }
+    if (out_target != (char **)0) {
+        *out_target = (char *)0;
+    }
+    if (out_source != (char **)0) {
+        *out_source = (char *)0;
+    }
+    if (out_depends != (char **)0) {
+        *out_depends = (char *)0;
+    }
+
+    if (line == (char *)0 || line[0] == '\0') {
+        return 0;
+    }
+
+    version = strchr(line, '|');
+    if (version == (char *)0) {
+        return 0;
+    }
+    *version = '\0';
+    version++;
+
+    target = strchr(version, '|');
+    if (target == (char *)0) {
+        return 0;
+    }
+    *target = '\0';
+    target++;
+
+    source = strchr(target, '|');
+    if (source != (char *)0) {
+        *source = '\0';
+        source++;
+        depends = strchr(source, '|');
+        if (depends != (char *)0) {
+            *depends = '\0';
+            depends++;
+        }
+    } else {
+        depends = (char *)0;
+    }
+
+    if (out_name != (char **)0) {
+        *out_name = line;
+    }
+    if (out_version != (char **)0) {
+        *out_version = version;
+    }
+    if (out_target != (char **)0) {
+        *out_target = target;
+    }
+    if (out_source != (char **)0) {
+        *out_source = (source != (char *)0) ? source : "";
+    }
+    if (out_depends != (char **)0) {
+        *out_depends = (depends != (char *)0) ? depends : "";
+    }
     return 1;
 }
 
@@ -1398,7 +1749,7 @@ static int pkg_record_install(const pkg_manifest *manifest, const char *source) 
     line = pkg_db_buf;
     while (*line != '\0') {
         char *next = line;
-        char line_copy[384];
+        char line_copy[PKG_DB_LINE_MAX];
         char *bar;
 
         while (*next != '\0' && *next != '\n') {
@@ -1432,6 +1783,8 @@ static int pkg_record_install(const pkg_manifest *manifest, const char *source) 
         pkg_append_char(pkg_db_new_buf, (u64)sizeof(pkg_db_new_buf), &new_len, '|') == 0 ||
         pkg_append_text(pkg_db_new_buf, (u64)sizeof(pkg_db_new_buf), &new_len,
                         (source != (const char *)0) ? source : "unknown") == 0 ||
+        pkg_append_char(pkg_db_new_buf, (u64)sizeof(pkg_db_new_buf), &new_len, '|') == 0 ||
+        pkg_append_text(pkg_db_new_buf, (u64)sizeof(pkg_db_new_buf), &new_len, manifest->depends) == 0 ||
         pkg_append_char(pkg_db_new_buf, (u64)sizeof(pkg_db_new_buf), &new_len, '\n') == 0) {
         return 0;
     }
@@ -1440,6 +1793,8 @@ static int pkg_record_install(const pkg_manifest *manifest, const char *source) 
 }
 
 static int pkg_install_elf_file(const pkg_manifest *manifest, const char *elf_path, const char *source) {
+    char actual_sha256[PKG_SHA256_MAX];
+
     if (manifest == (const pkg_manifest *)0 || elf_path == (const char *)0) {
         return 0;
     }
@@ -1452,6 +1807,23 @@ static int pkg_install_elf_file(const pkg_manifest *manifest, const char *elf_pa
     if (pkg_file_has_elf_magic(elf_path) == 0) {
         (void)puts("pkg: input is not an ELF file");
         return 0;
+    }
+
+    if (manifest->sha256[0] != '\0') {
+        if (pkg_hex_digest_is_valid(manifest->sha256) == 0) {
+            (void)puts("pkg: invalid manifest sha256");
+            return 0;
+        }
+        if (pkg_sha256_file_hex(elf_path, actual_sha256) == 0) {
+            (void)puts("pkg: sha256 calculation failed");
+            return 0;
+        }
+        if (pkg_hex_digest_equals(manifest->sha256, actual_sha256) == 0) {
+            (void)printf("pkg: sha256 mismatch for %s\n", manifest->name);
+            (void)printf("pkg: expected %s\n", manifest->sha256);
+            (void)printf("pkg: actual   %s\n", actual_sha256);
+            return 0;
+        }
     }
 
     if (pkg_copy_file(elf_path, manifest->target) == 0) {
@@ -1537,6 +1909,10 @@ static int pkg_install_manifest_file_with_depth(const ush_state *sh, const char 
     if (pkg_complete_manifest(sh, &manifest, (origin != (const char *)0) ? origin : manifest_path, origin_is_url) == 0) {
         (void)puts("pkg: incomplete manifest");
         return 0;
+    }
+
+    if (manifest.deprecated[0] != '\0') {
+        (void)printf("pkg: warning: package %s is deprecated: %s\n", manifest.name, manifest.deprecated);
     }
 
     if (pkg_install_dependency_list(sh, manifest.depends, depth) == 0) {
@@ -1684,37 +2060,20 @@ static int pkg_cmd_install(const ush_state *sh, const char *arg) {
 }
 
 static void pkg_print_db_line(char *line) {
+    char *name;
     char *version;
     char *target;
-    char *source;
 
     if (line == (char *)0 || line[0] == '\0') {
         return;
     }
 
-    version = strchr(line, '|');
-    if (version == (char *)0) {
+    if (pkg_db_line_parse(line, &name, &version, &target, (char **)0, (char **)0) == 0) {
         (void)puts(line);
         return;
     }
-    *version = '\0';
-    version++;
 
-    target = strchr(version, '|');
-    if (target == (char *)0) {
-        (void)printf("%-18s %s\n", line, version);
-        return;
-    }
-    *target = '\0';
-    target++;
-
-    source = strchr(target, '|');
-    if (source != (char *)0) {
-        *source = '\0';
-        source++;
-    }
-
-    (void)printf("%-18s %-12s %s\n", line, version, target);
+    (void)printf("%-18s %-12s %s\n", name, version, target);
 }
 
 static int pkg_cmd_list(void) {
@@ -1732,7 +2091,7 @@ static int pkg_cmd_list(void) {
     line = pkg_db_buf;
     while (*line != '\0') {
         char *next = line;
-        char copy[384];
+        char copy[PKG_DB_LINE_MAX];
 
         while (*next != '\0' && *next != '\n') {
             next++;
@@ -1777,7 +2136,7 @@ static int pkg_remove_record(const char *name, char *out_target, u64 out_target_
     line = pkg_db_buf;
     while (*line != '\0') {
         char *next = line;
-        char copy[384];
+        char copy[PKG_DB_LINE_MAX];
         char *bar;
 
         while (*next != '\0' && *next != '\n') {
@@ -1821,20 +2180,84 @@ static int pkg_remove_record(const char *name, char *out_target, u64 out_target_
     return pkg_write_file(PKG_DB_PATH, pkg_db_new_buf, new_len);
 }
 
+static int pkg_remove_has_reverse_dependencies(const char *name) {
+    u64 len = 0ULL;
+    char *line;
+    int blockers = 0;
+
+    if (pkg_read_file(PKG_DB_PATH, pkg_db_buf, (u64)sizeof(pkg_db_buf), &len) == 0 || len == 0ULL) {
+        return 0;
+    }
+
+    line = pkg_db_buf;
+    while (*line != '\0') {
+        char *next = line;
+        char copy[PKG_DB_LINE_MAX];
+        char *pkg_name;
+        char *depends;
+
+        while (*next != '\0' && *next != '\n') {
+            next++;
+        }
+        if (*next == '\n') {
+            *next = '\0';
+            next++;
+        }
+
+        if (line[0] != '\0') {
+            ush_copy(copy, (u64)sizeof(copy), line);
+            if (pkg_db_line_parse(copy, &pkg_name, (char **)0, (char **)0, (char **)0, &depends) != 0 &&
+                ush_streq(pkg_name, name) == 0 && pkg_dependency_list_mentions(depends, name) != 0) {
+                if (blockers == 0) {
+                    (void)printf("pkg: cannot remove %s, required by:\n", name);
+                }
+                (void)printf("  %s\n", pkg_name);
+                blockers = 1;
+            }
+        }
+
+        line = next;
+    }
+
+    if (blockers != 0) {
+        (void)puts("pkg: use pkg remove --force <name> to override");
+    }
+    return blockers;
+}
+
 static int pkg_cmd_remove(const char *arg) {
     char name[PKG_NAME_MAX];
     char target[USH_PATH_MAX];
     const char *rest = "";
     int found = 0;
+    int force = 0;
 
     if (arg == (const char *)0 || ush_split_first_and_rest(arg, name, (u64)sizeof(name), &rest) == 0 ||
-        pkg_safe_name(name) == 0) {
-        (void)puts("usage: pkg remove <name>");
+        name[0] == '\0') {
+        (void)puts("usage: pkg remove [--force] <name>");
+        return 0;
+    }
+
+    if (ush_streq(name, "--force") != 0 || ush_streq(name, "-f") != 0) {
+        force = 1;
+        if (rest == (const char *)0 || ush_split_first_and_rest(rest, name, (u64)sizeof(name), &rest) == 0 ||
+            name[0] == '\0') {
+            (void)puts("usage: pkg remove [--force] <name>");
+            return 0;
+        }
+    }
+
+    if (pkg_safe_name(name) == 0) {
+        (void)puts("pkg: invalid package name");
         return 0;
     }
 
     if (rest != (const char *)0 && rest[0] != '\0') {
-        (void)puts("pkg: remove accepts exactly one package name");
+        (void)puts("pkg: remove accepts one package name");
+        return 0;
+    }
+
+    if (force == 0 && pkg_remove_has_reverse_dependencies(name) != 0) {
         return 0;
     }
 
@@ -1920,10 +2343,12 @@ static int pkg_cmd_info(const char *arg) {
     line = pkg_db_buf;
     while (*line != '\0') {
         char *next = line;
-        char copy[384];
+        char copy[PKG_DB_LINE_MAX];
+        char *pkg_name;
         char *version;
         char *target;
         char *source;
+        char *depends;
 
         while (*next != '\0' && *next != '\n') {
             next++;
@@ -1934,27 +2359,15 @@ static int pkg_cmd_info(const char *arg) {
         }
 
         ush_copy(copy, (u64)sizeof(copy), line);
-        version = strchr(copy, '|');
-        if (version != (char *)0) {
-            *version = '\0';
-            version++;
-            if (ush_streq(copy, name) != 0) {
-                target = strchr(version, '|');
-                if (target != (char *)0) {
-                    *target = '\0';
-                    target++;
-                }
-                source = (target != (char *)0) ? strchr(target, '|') : (char *)0;
-                if (source != (char *)0) {
-                    *source = '\0';
-                    source++;
-                }
-                (void)printf("name: %s\n", name);
-                (void)printf("version: %s\n", version);
-                (void)printf("target: %s\n", (target != (char *)0) ? target : "");
-                (void)printf("source: %s\n", (source != (char *)0) ? source : "");
-                return 1;
+        if (pkg_db_line_parse(copy, &pkg_name, &version, &target, &source, &depends) != 0 && ush_streq(pkg_name, name) != 0) {
+            (void)printf("name: %s\n", name);
+            (void)printf("version: %s\n", version);
+            (void)printf("target: %s\n", target);
+            (void)printf("source: %s\n", source);
+            if (depends[0] != '\0') {
+                (void)printf("depends: %s\n", depends);
             }
+            return 1;
         }
 
         line = next;
@@ -2043,6 +2456,12 @@ static int pkg_cmd_remote_info(const char *arg) {
     (void)printf("tags: %s\n", package.tags);
     (void)printf("owner: %s\n", package.owner);
     (void)printf("description: %s\n", package.description);
+    if (package.deprecated[0] != '\0') {
+        (void)printf("deprecated: %s\n", package.deprecated);
+    }
+    if (package.sha256[0] != '\0') {
+        (void)printf("sha256: %s\n", package.sha256);
+    }
     (void)printf("manifest: %s\n", package.manifest_url);
     (void)printf("download: %s\n", package.download_url);
     return 1;
@@ -2168,7 +2587,7 @@ static int pkg_find_installed_version_in_db(const char *db_text, const char *nam
     line = db_text;
     while (*line != '\0') {
         const char *next = line;
-        char copy[384];
+        char copy[PKG_DB_LINE_MAX];
         u64 len = 0ULL;
         char *version;
 
@@ -2370,7 +2789,7 @@ static void pkg_usage(void) {
     (void)puts("usage:");
     (void)puts("  pkg install <name|file.elf|file.clpkg|url>");
     (void)puts("  pkg list");
-    (void)puts("  pkg remove <name>");
+    (void)puts("  pkg remove [--force] <name>");
     (void)puts("  pkg info <name>");
     (void)puts("  pkg remote list");
     (void)puts("  pkg remote info <name>");
@@ -2382,7 +2801,7 @@ static void pkg_usage(void) {
     (void)puts("  pkg upgrade --all");
     (void)puts("  pkg repo [url]");
     (void)puts("");
-    (void)puts("manifest keys: name, version, target, url/path/elf, description, depends, category, tags");
+    (void)puts("manifest keys: name, version, target, url/path/elf, description, depends, category, tags, sha256, deprecated");
 }
 
 static int pkg_run(const ush_state *sh, const char *arg) {

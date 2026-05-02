@@ -13,6 +13,7 @@ pkg install http://host/path/app.elf
 pkg list
 pkg info <name>
 pkg remove <name>
+pkg remove --force <name>
 pkg remote list
 pkg remote info <name>
 pkg search <keyword>
@@ -60,6 +61,8 @@ description=Hello from the CLeonOS kit.
 depends=libfoo>=1.0.0,libbar
 category=demo
 tags=hello,sample
+sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+deprecated=Use hello2 instead.
 ```
 
 Local manifests can use a local ELF path instead:
@@ -79,6 +82,26 @@ tags=hello,sample
 `depends` is a comma-separated dependency list. Each entry supports `name`,
 `name@version`, `name=version`, `name>=version`, `name<=version`,
 `name>version`, `name<version`, and `name!=version`.
+`sha256` is optional for local manifests, but repository manifests include it
+automatically. The client verifies the downloaded ELF before installing.
+`deprecated` is optional. If present, the client warns before installing.
+
+## Uninstall Protection
+
+Installed package records include dependency metadata for packages installed by
+this client version. `pkg remove <name>` refuses to remove a package when another
+installed package depends on it:
+
+```sh
+pkg remove libfoo
+```
+
+Force removal bypasses the reverse-dependency check:
+
+```sh
+pkg remove --force libfoo
+pkg remove -f libfoo
+```
 
 ## Server
 
@@ -132,6 +155,8 @@ POST /index.php?api=login
 GET  /index.php?api=logout
 POST /index.php?api=upload
 POST /index.php?api=update
+POST /index.php?api=deprecate
+POST /index.php?api=delete
 ```
 
 `api=list` returns all packages. `api=info` returns one package by name.
@@ -146,7 +171,8 @@ username=<name>
 password=<password>
 ```
 
-Upload API uses `multipart/form-data` and requires login:
+Upload API uses `multipart/form-data` and requires login. The ELF file must be
+no larger than 3 MiB:
 
 ```text
 name=<package-name>
@@ -156,11 +182,12 @@ description=<short text>
 depends=<dependency constraints>
 category=<category>
 tags=<comma-separated tags>
+deprecated=<optional warning text>
 elf=<uploaded ELF file>
 ```
 
 Update API also uses `multipart/form-data` and requires login as the package
-owner:
+owner. Replacement ELF uploads are also limited to 3 MiB:
 
 ```text
 name=<existing-package-name>
@@ -170,12 +197,28 @@ description=<short text>
 depends=<dependency constraints>
 category=<category>
 tags=<comma-separated tags>
+deprecated=<optional warning text>
 elf=<optional replacement ELF file>
 ```
 
 Only the package creator can update an existing package. Metadata can be
 changed without uploading a new ELF. If `elf` is present, the stored package
 binary is replaced after ELF magic validation.
+
+Only the package creator can deprecate or delete a package:
+
+```text
+POST /index.php?api=deprecate
+name=<existing-package-name>
+deprecated=<warning text, empty to clear>
+
+POST /index.php?api=delete
+name=<existing-package-name>
+```
+
+Repository manifests and JSON API responses include `sha256`. The checksum is
+computed from the stored ELF, so package owners do not submit it manually.
+Public-key package signatures are reserved for a later manifest revision.
 
 The uploaded file is normalized to:
 

@@ -5,7 +5,8 @@ session_start();
 
 $repoDir = __DIR__ . '/packages';
 
-const PKG_MAX_UPLOAD_BYTES = 33554432;
+const PKG_MAX_UPLOAD_BYTES = 3145728;
+const PKG_MAX_UPLOAD_LABEL = '3 MiB';
 
 function pkg_valid_name(string $name): bool {
     return preg_match('/^[A-Za-z0-9_.-]{1,63}$/', $name) === 1;
@@ -60,6 +61,10 @@ function pkg_valid_tags(string $tags): bool {
     return true;
 }
 
+function pkg_valid_deprecated(string $deprecated): bool {
+    return strlen($deprecated) <= 256;
+}
+
 function pkg_clean_line(string $value, int $maxLen): string {
     $value = trim(str_replace(["\r", "\n"], ' ', $value));
     $value = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/', '', $value) ?? '';
@@ -82,6 +87,27 @@ function pkg_has_suffix(string $text, string $suffix): bool {
 
 function pkg_contains(string $text, string $needle): bool {
     return $needle === '' || strpos($text, $needle) !== false;
+}
+
+function pkg_rrmdir(string $path): bool {
+    if (!is_dir($path)) {
+        return false;
+    }
+
+    foreach (scandir($path) ?: [] as $entry) {
+        if ($entry === '.' || $entry === '..') {
+            continue;
+        }
+        $child = $path . '/' . $entry;
+        if (is_dir($child)) {
+            if (!pkg_rrmdir($child)) {
+                return false;
+            }
+        } elseif (!unlink($child)) {
+            return false;
+        }
+    }
+    return rmdir($path);
 }
 
 function pkg_base_url(): string {
@@ -262,6 +288,7 @@ function pkg_read_meta(string $dir): array {
         'depends' => '',
         'category' => '',
         'tags' => '',
+        'deprecated' => '',
         'owner' => '',
         'uploaded_at' => '',
         'updated_at' => '',
@@ -295,6 +322,7 @@ function pkg_package_info(string $repoDir, string $name): ?array {
     $target = $meta['target'] !== '' ? $meta['target'] : '/shell/' . $name . '.elf';
     $mtime = filemtime($elf);
     $size = filesize($elf);
+    $sha256 = hash_file('sha256', $elf);
     $updatedAt = $meta['updated_at'] !== '' ? $meta['updated_at'] : gmdate('c', is_int($mtime) ? $mtime : time());
 
     return [
@@ -305,9 +333,11 @@ function pkg_package_info(string $repoDir, string $name): ?array {
         'depends' => $meta['depends'],
         'category' => $meta['category'],
         'tags' => $meta['tags'],
+        'deprecated' => $meta['deprecated'],
         'owner' => $meta['owner'],
         'uploaded_at' => $meta['uploaded_at'],
         'size' => is_int($size) ? $size : 0,
+        'sha256' => is_string($sha256) ? $sha256 : '',
         'updated_at' => $updatedAt,
         'manifest_url' => pkg_base_url() . '?manifest=' . rawurlencode($name),
         'download_url' => pkg_base_url() . '?download=' . rawurlencode($name),
@@ -411,6 +441,9 @@ function pkg_manifest(string $repoDir, string $name): never {
     echo "version=" . $info['version'] . "\n";
     echo "target=" . $info['target'] . "\n";
     echo "url=" . $info['download_url'] . "\n";
+    if ($info['sha256'] !== '') {
+        echo "sha256=" . $info['sha256'] . "\n";
+    }
     if ($info['description'] !== '') {
         echo "description=" . str_replace(["\r", "\n"], ' ', (string)$info['description']) . "\n";
     }
@@ -422,6 +455,9 @@ function pkg_manifest(string $repoDir, string $name): never {
     }
     if ($info['tags'] !== '') {
         echo "tags=" . str_replace(["\r", "\n"], ' ', (string)$info['tags']) . "\n";
+    }
+    if ($info['deprecated'] !== '') {
+        echo "deprecated=" . str_replace(["\r", "\n"], ' ', (string)$info['deprecated']) . "\n";
     }
     exit;
 }
@@ -472,7 +508,8 @@ function pkg_ini_escape(string $value): string {
 
 function pkg_write_package_meta(string $dir, array $meta): bool {
     $lines = [];
-    foreach (['version', 'target', 'description', 'depends', 'category', 'tags', 'owner', 'uploaded_at', 'updated_at'] as $key) {
+    foreach (['version', 'target', 'description', 'depends', 'category', 'tags', 'deprecated', 'owner', 'uploaded_at',
+              'updated_at'] as $key) {
         $value = isset($meta[$key]) && is_string($meta[$key]) ? $meta[$key] : '';
         $lines[] = $key . '=' . pkg_ini_escape($value);
     }
@@ -503,7 +540,7 @@ function pkg_store_uploaded_elf(array $file, string $elfPath, string &$message):
         return false;
     }
     if ((int)$file['size'] <= 0 || (int)$file['size'] > PKG_MAX_UPLOAD_BYTES) {
-        $message = 'ELF size must be 1 byte to ' . (string)PKG_MAX_UPLOAD_BYTES . ' bytes';
+        $message = 'ELF size must be 1 byte to ' . PKG_MAX_UPLOAD_LABEL;
         return false;
     }
 
@@ -531,7 +568,7 @@ function pkg_store_uploaded_elf(array $file, string $elfPath, string &$message):
 }
 
 function pkg_validate_package_meta(string $name, string $version, string $target, string $depends, string $category,
-                                   string $tags, string &$message): bool {
+                                   string $tags, string $deprecated, string &$message): bool {
     if (!pkg_valid_name($name)) {
         $message = 'invalid package name';
         return false;
@@ -556,6 +593,10 @@ function pkg_validate_package_meta(string $name, string $version, string $target
         $message = 'invalid tags';
         return false;
     }
+    if (!pkg_valid_deprecated($deprecated)) {
+        $message = 'deprecated text is too long';
+        return false;
+    }
     return true;
 }
 
@@ -573,6 +614,7 @@ function pkg_upload_package(string $repoDir, string $username, array &$outPackag
     $depends = pkg_clean_line((string)($_POST['depends'] ?? ''), 512);
     $category = pkg_clean_line((string)($_POST['category'] ?? ''), 63);
     $tags = pkg_clean_line((string)($_POST['tags'] ?? ''), 256);
+    $deprecated = pkg_clean_line((string)($_POST['deprecated'] ?? ''), 256);
 
     if ($version === '') {
         $version = '1.0.0';
@@ -581,7 +623,7 @@ function pkg_upload_package(string $repoDir, string $username, array &$outPackag
         $target = '/shell/' . $name . '.elf';
     }
 
-    if (!pkg_validate_package_meta($name, $version, $target, $depends, $category, $tags, $message)) {
+    if (!pkg_validate_package_meta($name, $version, $target, $depends, $category, $tags, $deprecated, $message)) {
         return false;
     }
 
@@ -629,6 +671,7 @@ function pkg_upload_package(string $repoDir, string $username, array &$outPackag
         'depends' => $depends,
         'category' => $category,
         'tags' => $tags,
+        'deprecated' => $deprecated,
         'owner' => $username,
         'uploaded_at' => $uploadedAt,
         'updated_at' => $now,
@@ -675,11 +718,12 @@ function pkg_update_package(string $repoDir, string $username, array &$outPackag
     $depends = pkg_post_field('depends', (string)$info['depends'], 512);
     $category = pkg_post_field('category', (string)$info['category'], 63);
     $tags = pkg_post_field('tags', (string)$info['tags'], 256);
+    $deprecated = pkg_post_field('deprecated', (string)$info['deprecated'], 256);
     if ($target === '') {
         $target = '/shell/' . $name . '.elf';
     }
 
-    if (!pkg_validate_package_meta($name, $version, $target, $depends, $category, $tags, $message)) {
+    if (!pkg_validate_package_meta($name, $version, $target, $depends, $category, $tags, $deprecated, $message)) {
         return false;
     }
 
@@ -700,6 +744,7 @@ function pkg_update_package(string $repoDir, string $username, array &$outPackag
         'depends' => $depends,
         'category' => $category,
         'tags' => $tags,
+        'deprecated' => $deprecated,
         'owner' => $username,
         'uploaded_at' => (isset($info['uploaded_at']) && is_string($info['uploaded_at'])) ? $info['uploaded_at'] : '',
         'updated_at' => $now,
@@ -714,6 +759,83 @@ function pkg_update_package(string $repoDir, string $username, array &$outPackag
         $outPackage = $updated;
     }
     $message = 'package updated';
+    return true;
+}
+
+function pkg_delete_package(string $repoDir, string $username, string &$message): bool {
+    if ($username === '') {
+        $message = 'login required';
+        return false;
+    }
+
+    $name = pkg_clean_line((string)($_POST['name'] ?? $_GET['name'] ?? ''), 63);
+    if (!pkg_valid_name($name)) {
+        $message = 'invalid package name';
+        return false;
+    }
+
+    $info = pkg_package_info($repoDir, $name);
+    if ($info === null) {
+        $message = 'package not found';
+        return false;
+    }
+    if (!pkg_user_can_edit_package($info, $username)) {
+        $message = 'only the package owner can delete this package';
+        return false;
+    }
+
+    if (!pkg_rrmdir(pkg_package_dir($repoDir, $name))) {
+        $message = 'failed to delete package';
+        return false;
+    }
+
+    $message = 'package deleted';
+    return true;
+}
+
+function pkg_deprecate_package(string $repoDir, string $username, array &$outPackage, string &$message): bool {
+    $outPackage = [];
+    if ($username === '') {
+        $message = 'login required';
+        return false;
+    }
+
+    $name = pkg_clean_line((string)($_POST['name'] ?? $_GET['name'] ?? ''), 63);
+    if (!pkg_valid_name($name)) {
+        $message = 'invalid package name';
+        return false;
+    }
+
+    $info = pkg_package_info($repoDir, $name);
+    if ($info === null) {
+        $message = 'package not found';
+        return false;
+    }
+    if (!pkg_user_can_edit_package($info, $username)) {
+        $message = 'only the package owner can deprecate this package';
+        return false;
+    }
+
+    $deprecated = pkg_clean_line((string)($_POST['deprecated'] ?? ''), 256);
+    if (!pkg_valid_deprecated($deprecated)) {
+        $message = 'deprecated text is too long';
+        return false;
+    }
+
+    $dir = pkg_package_dir($repoDir, $name);
+    $meta = pkg_read_meta($dir);
+    $meta['deprecated'] = $deprecated;
+    $meta['updated_at'] = gmdate('c');
+    if (!pkg_write_package_meta($dir, $meta)) {
+        $message = 'failed to write package metadata';
+        return false;
+    }
+
+    $updated = pkg_package_info($repoDir, $name);
+    if ($updated !== null) {
+        $outPackage = $updated;
+    }
+    $message = ($deprecated === '') ? 'package deprecation cleared' : 'package deprecated';
     return true;
 }
 
@@ -857,6 +979,38 @@ function pkg_api(string $repoDir, string $api): never {
         ]);
     }
 
+    if ($api === 'deprecate') {
+        if (($_SERVER['REQUEST_METHOD'] ?? 'GET') !== 'POST') {
+            pkg_error_json('POST required', 405);
+        }
+        $message = '';
+        $package = [];
+        $ok = pkg_deprecate_package($repoDir, pkg_current_username(), $package, $message);
+        if (!$ok) {
+            pkg_error_json($message, 400);
+        }
+        pkg_json([
+            'ok' => true,
+            'message' => $message,
+            'package' => $package,
+        ]);
+    }
+
+    if ($api === 'delete') {
+        if (($_SERVER['REQUEST_METHOD'] ?? 'GET') !== 'POST') {
+            pkg_error_json('POST required', 405);
+        }
+        $message = '';
+        $ok = pkg_delete_package($repoDir, pkg_current_username(), $message);
+        if (!$ok) {
+            pkg_error_json($message, 400);
+        }
+        pkg_json([
+            'ok' => true,
+            'message' => $message,
+        ]);
+    }
+
     pkg_error_json('unknown api', 404);
 }
 
@@ -908,7 +1062,17 @@ if ($view === 'upload' && ($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
 
 if ($view === 'edit' && ($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
     $package = [];
-    $messageOk = pkg_update_package($repoDir, pkg_current_username(), $package, $message);
+    $action = (string)($_POST['action'] ?? 'update');
+    if ($action === 'delete') {
+        $messageOk = pkg_delete_package($repoDir, pkg_current_username(), $message);
+        if ($messageOk) {
+            $view = 'mine';
+        }
+    } elseif ($action === 'deprecate') {
+        $messageOk = pkg_deprecate_package($repoDir, pkg_current_username(), $package, $message);
+    } else {
+        $messageOk = pkg_update_package($repoDir, pkg_current_username(), $package, $message);
+    }
 }
 
 $currentUser = pkg_current_username();
@@ -964,6 +1128,7 @@ logged in as <?php echo pkg_html($currentUser); ?>
 <p>Login required.</p>
 <?php else: ?>
 <form method="post" action="?upload=1" enctype="multipart/form-data">
+<input type="hidden" name="MAX_FILE_SIZE" value="<?php echo (string)PKG_MAX_UPLOAD_BYTES; ?>">
 <p><label>Name <input name="name" required maxlength="63"></label></p>
 <p><label>Version <input name="version" value="1.0.0" required maxlength="64"></label></p>
 <p><label>Target <input name="target" placeholder="/shell/name.elf" maxlength="160"></label></p>
@@ -971,7 +1136,8 @@ logged in as <?php echo pkg_html($currentUser); ?>
 <p><label>Depends <input name="depends" placeholder="foo>=1.0.0,bar" maxlength="512"></label></p>
 <p><label>Category <input name="category" placeholder="network" maxlength="63"></label></p>
 <p><label>Tags <input name="tags" placeholder="gui,http,tool" maxlength="256"></label></p>
-<p><label>ELF file <input name="elf" type="file" required></label></p>
+<p><label>Deprecated message <input name="deprecated" maxlength="256"></label></p>
+<p><label>ELF file <input name="elf" type="file" required></label> Max <?php echo pkg_html(PKG_MAX_UPLOAD_LABEL); ?>.</p>
 <p><button type="submit">Upload</button></p>
 </form>
 <?php endif; ?>
@@ -985,6 +1151,7 @@ logged in as <?php echo pkg_html($currentUser); ?>
 <p>Only the package owner can edit this package.</p>
 <?php else: ?>
 <form method="post" action="?edit=<?php echo rawurlencode((string)$editPackage['name']); ?>" enctype="multipart/form-data">
+<input type="hidden" name="MAX_FILE_SIZE" value="<?php echo (string)PKG_MAX_UPLOAD_BYTES; ?>">
 <p><label>Name <input name="name" value="<?php echo pkg_html((string)$editPackage['name']); ?>" readonly></label></p>
 <p><label>Version <input name="version" value="<?php echo pkg_html((string)$editPackage['version']); ?>" required maxlength="64"></label></p>
 <p><label>Target <input name="target" value="<?php echo pkg_html((string)$editPackage['target']); ?>" maxlength="160"></label></p>
@@ -992,8 +1159,19 @@ logged in as <?php echo pkg_html($currentUser); ?>
 <p><label>Depends <input name="depends" value="<?php echo pkg_html((string)$editPackage['depends']); ?>" maxlength="512"></label></p>
 <p><label>Category <input name="category" value="<?php echo pkg_html((string)$editPackage['category']); ?>" maxlength="63"></label></p>
 <p><label>Tags <input name="tags" value="<?php echo pkg_html((string)$editPackage['tags']); ?>" maxlength="256"></label></p>
-<p><label>Replace ELF <input name="elf" type="file"></label></p>
-<p><button type="submit">Update Package</button></p>
+<p><label>Deprecated message <input name="deprecated" value="<?php echo pkg_html((string)$editPackage['deprecated']); ?>" maxlength="256"></label></p>
+<p><label>Replace ELF <input name="elf" type="file"></label> Max <?php echo pkg_html(PKG_MAX_UPLOAD_LABEL); ?>.</p>
+<p>SHA256: <?php echo pkg_html((string)$editPackage['sha256']); ?></p>
+<p><button type="submit" name="action" value="update">Update Package</button></p>
+</form>
+<form method="post" action="?edit=<?php echo rawurlencode((string)$editPackage['name']); ?>">
+<input type="hidden" name="name" value="<?php echo pkg_html((string)$editPackage['name']); ?>">
+<input type="hidden" name="deprecated" value="<?php echo pkg_html(((string)$editPackage['deprecated'] === '') ? 'Deprecated by package owner' : ''); ?>">
+<p><button type="submit" name="action" value="deprecate"><?php echo ((string)$editPackage['deprecated'] === '') ? 'Mark Deprecated' : 'Clear Deprecated'; ?></button></p>
+</form>
+<form method="post" action="?edit=<?php echo rawurlencode((string)$editPackage['name']); ?>">
+<input type="hidden" name="name" value="<?php echo pkg_html((string)$editPackage['name']); ?>">
+<p><button type="submit" name="action" value="delete">Delete Package</button></p>
 </form>
 <?php endif; ?>
 <?php elseif ($view === 'mine'): ?>
@@ -1004,13 +1182,14 @@ logged in as <?php echo pkg_html($currentUser); ?>
 <p>No packages owned by this account.</p>
 <?php else: ?>
 <table border="1" cellpadding="4" cellspacing="0">
-<tr><th>Name</th><th>Version</th><th>Category</th><th>Tags</th><th>Description</th><th>Links</th></tr>
+<tr><th>Name</th><th>Version</th><th>Category</th><th>Tags</th><th>Deprecated</th><th>Description</th><th>Links</th></tr>
 <?php foreach ($myPackages as $package): ?>
 <tr>
 <td><?php echo pkg_html((string)$package['name']); ?></td>
 <td><?php echo pkg_html((string)$package['version']); ?></td>
 <td><?php echo pkg_html((string)$package['category']); ?></td>
 <td><?php echo pkg_html((string)$package['tags']); ?></td>
+<td><?php echo pkg_html((string)$package['deprecated']); ?></td>
 <td><?php echo pkg_html((string)$package['description']); ?></td>
 <td>
 <a href="?edit=<?php echo rawurlencode((string)$package['name']); ?>">edit</a>
@@ -1035,13 +1214,15 @@ logged in as <?php echo pkg_html($currentUser); ?>
 <li><a href="?api=tag&amp;name=gui">?api=tag&amp;name=gui</a></li>
 <li><a href="?api=me">?api=me</a></li>
 <li>POST ?api=update</li>
+<li>POST ?api=deprecate</li>
+<li>POST ?api=delete</li>
 </ul>
 <h2>Packages</h2>
 <?php if (count($packages) === 0): ?>
 <p>No packages.</p>
 <?php else: ?>
 <table border="1" cellpadding="4" cellspacing="0">
-<tr><th>Name</th><th>Version</th><th>Category</th><th>Tags</th><th>Owner</th><th>Description</th><th>Links</th></tr>
+<tr><th>Name</th><th>Version</th><th>Category</th><th>Tags</th><th>Owner</th><th>Deprecated</th><th>Description</th><th>Links</th></tr>
 <?php foreach ($packages as $package): ?>
 <tr>
 <td><?php echo pkg_html((string)$package['name']); ?></td>
@@ -1049,6 +1230,7 @@ logged in as <?php echo pkg_html($currentUser); ?>
 <td><?php echo pkg_html((string)$package['category']); ?></td>
 <td><?php echo pkg_html((string)$package['tags']); ?></td>
 <td><?php echo pkg_html((string)$package['owner']); ?></td>
+<td><?php echo pkg_html((string)$package['deprecated']); ?></td>
 <td><?php echo pkg_html((string)$package['description']); ?></td>
 <td>
 <a href="?api=info&amp;name=<?php echo rawurlencode((string)$package['name']); ?>">info</a>
