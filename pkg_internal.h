@@ -7,6 +7,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <cJSON.h>
 
 #define PKG_DB_DIR "/system/pkg"
 #define PKG_DB_PATH "/system/pkg/installed.db"
@@ -126,6 +127,10 @@ const char *pkg_json_object_end(const char *object_start);
 int pkg_json_read_string_value(const char *value, const char *end, char *out, u64 out_size);
 int pkg_json_get_string(const char *start, const char *end, const char *key, char *out, u64 out_size);
 int pkg_json_get_number_text(const char *start, const char *end, const char *key, char *out, u64 out_size);
+int pkg_cjson_copy_string(cJSON *object, const char *key, char *out, u64 out_size);
+int pkg_cjson_copy_number_text(cJSON *object, const char *key, char *out, u64 out_size);
+int pkg_cjson_copy_bool_text(cJSON *object, const char *key, char *out, u64 out_size);
+int pkg_cjson_copy_string_array(cJSON *object, const char *key, char *out, u64 out_size);
 int pkg_read_file(const char *path, char *out, u64 out_size, u64 *out_len);
 int pkg_write_file(const char *path, const char *data, u64 size);
 int pkg_copy_file(const char *src, const char *dst);

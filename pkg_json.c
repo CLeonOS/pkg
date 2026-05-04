@@ -177,3 +177,122 @@ int pkg_json_get_number_text(const char *start, const char *end, const char *key
 
     return (used > 0ULL) ? 1 : 0;
 }
+
+int pkg_cjson_copy_string(cJSON *object, const char *key, char *out, u64 out_size) {
+    cJSON *item;
+
+    if (out == (char *)0 || out_size == 0ULL) {
+        return 0;
+    }
+    out[0] = '\0';
+    if (object == (cJSON *)0 || key == (const char *)0) {
+        return 0;
+    }
+
+    item = cJSON_GetObjectItemCaseSensitive(object, key);
+    if (cJSON_IsString(item) != 0 && item->valuestring != (char *)0) {
+        ush_copy(out, out_size, item->valuestring);
+        return 1;
+    }
+    if (cJSON_IsNumber(item) != 0) {
+        int ret = snprintf(out, (usize)out_size, "%d", item->valueint);
+        return (ret > 0 && (u64)ret < out_size) ? 1 : 0;
+    }
+    if (cJSON_IsTrue(item) != 0) {
+        ush_copy(out, out_size, "1");
+        return 1;
+    }
+    if (cJSON_IsFalse(item) != 0) {
+        ush_copy(out, out_size, "0");
+        return 1;
+    }
+
+    return 0;
+}
+
+int pkg_cjson_copy_number_text(cJSON *object, const char *key, char *out, u64 out_size) {
+    cJSON *item;
+
+    if (out == (char *)0 || out_size == 0ULL) {
+        return 0;
+    }
+    out[0] = '\0';
+    if (object == (cJSON *)0 || key == (const char *)0) {
+        return 0;
+    }
+
+    item = cJSON_GetObjectItemCaseSensitive(object, key);
+    if (cJSON_IsNumber(item) != 0) {
+        int ret = snprintf(out, (usize)out_size, "%d", item->valueint);
+        return (ret > 0 && (u64)ret < out_size) ? 1 : 0;
+    }
+    if (cJSON_IsString(item) != 0 && item->valuestring != (char *)0) {
+        ush_copy(out, out_size, item->valuestring);
+        return 1;
+    }
+
+    return 0;
+}
+
+int pkg_cjson_copy_bool_text(cJSON *object, const char *key, char *out, u64 out_size) {
+    cJSON *item;
+
+    if (out == (char *)0 || out_size == 0ULL) {
+        return 0;
+    }
+    out[0] = '\0';
+    if (object == (cJSON *)0 || key == (const char *)0) {
+        return 0;
+    }
+
+    item = cJSON_GetObjectItemCaseSensitive(object, key);
+    if (cJSON_IsTrue(item) != 0) {
+        ush_copy(out, out_size, "1");
+        return 1;
+    }
+    if (cJSON_IsFalse(item) != 0) {
+        ush_copy(out, out_size, "0");
+        return 1;
+    }
+    return pkg_cjson_copy_string(object, key, out, out_size);
+}
+
+int pkg_cjson_copy_string_array(cJSON *object, const char *key, char *out, u64 out_size) {
+    cJSON *array;
+    cJSON *item;
+    u64 used = 0ULL;
+    int first = 1;
+
+    if (out == (char *)0 || out_size == 0ULL) {
+        return 0;
+    }
+    out[0] = '\0';
+    if (object == (cJSON *)0 || key == (const char *)0) {
+        return 0;
+    }
+
+    array = cJSON_GetObjectItemCaseSensitive(object, key);
+    if (cJSON_IsString(array) != 0 && array->valuestring != (char *)0) {
+        ush_copy(out, out_size, array->valuestring);
+        return 1;
+    }
+    if (cJSON_IsArray(array) == 0) {
+        return 0;
+    }
+
+    cJSON_ArrayForEach(item, array) {
+        const char *text = (cJSON_IsString(item) != 0 && item->valuestring != (char *)0) ? item->valuestring : (const char *)0;
+        if (text == (const char *)0) {
+            continue;
+        }
+        if (first == 0 && pkg_append_char(out, out_size, &used, ',') == 0) {
+            return 0;
+        }
+        if (pkg_append_text(out, out_size, &used, text) == 0) {
+            return 0;
+        }
+        first = 0;
+    }
+
+    return (used > 0ULL) ? 1 : 0;
+}

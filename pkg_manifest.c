@@ -118,14 +118,87 @@ void pkg_manifest_init(pkg_manifest *manifest) {
     }
 }
 
+static int pkg_parse_manifest_json(const char *text, pkg_manifest *out_manifest) {
+    cJSON *root;
+    cJSON *object;
+    cJSON *nested;
+
+    if (text == (const char *)0 || out_manifest == (pkg_manifest *)0) {
+        return 0;
+    }
+
+    root = cJSON_Parse(text);
+    if (root == (cJSON *)0) {
+        return 0;
+    }
+
+    object = root;
+    nested = cJSON_GetObjectItemCaseSensitive(root, "package");
+    if (cJSON_IsObject(nested) != 0) {
+        object = nested;
+    }
+
+    (void)pkg_cjson_copy_string(object, "name", out_manifest->name, (u64)sizeof(out_manifest->name));
+    (void)pkg_cjson_copy_string(object, "version", out_manifest->version, (u64)sizeof(out_manifest->version));
+    (void)pkg_cjson_copy_string(object, "target", out_manifest->target, (u64)sizeof(out_manifest->target));
+    (void)pkg_cjson_copy_string(object, "url", out_manifest->url, (u64)sizeof(out_manifest->url));
+    if (out_manifest->url[0] == '\0') {
+        (void)pkg_cjson_copy_string(object, "elf_url", out_manifest->url, (u64)sizeof(out_manifest->url));
+    }
+    if (out_manifest->url[0] == '\0') {
+        (void)pkg_cjson_copy_string(object, "download_url", out_manifest->url, (u64)sizeof(out_manifest->url));
+    }
+
+    if (pkg_cjson_copy_string(object, "path", out_manifest->path, (u64)sizeof(out_manifest->path)) == 0 &&
+        pkg_cjson_copy_string(object, "elf", out_manifest->path, (u64)sizeof(out_manifest->path)) == 0) {
+        (void)pkg_cjson_copy_string(object, "file", out_manifest->path, (u64)sizeof(out_manifest->path));
+    }
+    if (pkg_is_url(out_manifest->path) != 0) {
+        ush_copy(out_manifest->url, (u64)sizeof(out_manifest->url), out_manifest->path);
+        out_manifest->path[0] = '\0';
+    }
+
+    (void)pkg_cjson_copy_string(object, "description", out_manifest->description,
+                                (u64)sizeof(out_manifest->description));
+    if (out_manifest->description[0] == '\0') {
+        (void)pkg_cjson_copy_string(object, "desc", out_manifest->description,
+                                    (u64)sizeof(out_manifest->description));
+    }
+
+    if (pkg_cjson_copy_string_array(object, "depends", out_manifest->depends,
+                                    (u64)sizeof(out_manifest->depends)) == 0) {
+        (void)pkg_cjson_copy_string_array(object, "dependencies", out_manifest->depends,
+                                          (u64)sizeof(out_manifest->depends));
+    }
+    (void)pkg_cjson_copy_string(object, "category", out_manifest->category, (u64)sizeof(out_manifest->category));
+    (void)pkg_cjson_copy_string_array(object, "tags", out_manifest->tags, (u64)sizeof(out_manifest->tags));
+    if (pkg_cjson_copy_string(object, "sha256", out_manifest->sha256, (u64)sizeof(out_manifest->sha256)) == 0) {
+        (void)pkg_cjson_copy_string(object, "checksum", out_manifest->sha256, (u64)sizeof(out_manifest->sha256));
+    }
+    if (pkg_cjson_copy_string(object, "deprecated", out_manifest->deprecated,
+                              (u64)sizeof(out_manifest->deprecated)) == 0) {
+        (void)pkg_cjson_copy_string(object, "deprecation", out_manifest->deprecated,
+                                    (u64)sizeof(out_manifest->deprecated));
+    }
+
+    cJSON_Delete(root);
+    return (pkg_safe_name(out_manifest->name) != 0) ? 1 : 0;
+}
+
 int pkg_parse_manifest(char *text, pkg_manifest *out_manifest) {
     char *line;
+    const char *start;
 
     if (text == (char *)0 || out_manifest == (pkg_manifest *)0) {
         return 0;
     }
 
     pkg_manifest_init(out_manifest);
+    start = pkg_skip_ws_const(text);
+    if (start != (const char *)0 && *start == '{') {
+        return pkg_parse_manifest_json(start, out_manifest);
+    }
+
     line = text;
     while (*line != '\0') {
         char *next = line;
