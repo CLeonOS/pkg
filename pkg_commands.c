@@ -1,5 +1,18 @@
 #include "pkg_internal.h"
 
+typedef struct pkg_list_ctx {
+    int any;
+} pkg_list_ctx;
+
+typedef struct pkg_source_list_ctx {
+    const char *active;
+    int any;
+} pkg_source_list_ctx;
+
+typedef struct pkg_update_ctx {
+    int any;
+} pkg_update_ctx;
+
 int pkg_cmd_install(const ush_state *sh, const char *arg) {
     char first[PKG_URL_MAX];
     const char *rest = "";
@@ -115,153 +128,83 @@ void pkg_print_db_line(char *line) {
     (void)printf("%-18s %-12s %s\n", name, version, target);
 }
 
-int pkg_cmd_list(void) {
-    u64 len = 0ULL;
-    char *line;
-    int any = 0;
+static int pkg_list_iter(const pkg_installed_record *record, void *ctx_ptr) {
+    pkg_list_ctx *ctx = (pkg_list_ctx *)ctx_ptr;
 
-    if (pkg_read_file(PKG_DB_PATH, pkg_db_buf, (u64)sizeof(pkg_db_buf), &len) == 0 || len == 0ULL) {
-        (void)puts("pkg: no packages installed");
-        return 1;
+    if (record == (const pkg_installed_record *)0 || ctx == (pkg_list_ctx *)0) {
+        return 0;
+    }
+
+    (void)printf("%-18s %-12s %s\n", record->name, record->version, record->target);
+    ctx->any = 1;
+    return 1;
+}
+
+int pkg_cmd_list(void) {
+    pkg_list_ctx ctx;
+
+    ush_zero(&ctx, (u64)sizeof(ctx));
+    if (pkg_sqlite_init() == 0) {
+        (void)puts("pkg: cannot open package database");
+        return 0;
     }
 
     (void)puts("name               version      target");
     (void)puts("------------------------------------------------------------");
-    line = pkg_db_buf;
-    while (*line != '\0') {
-        char *next = line;
-        char copy[PKG_DB_LINE_MAX];
-
-        while (*next != '\0' && *next != '\n') {
-            next++;
-        }
-        if (*next == '\n') {
-            *next = '\0';
-            next++;
-        }
-
-        if (line[0] != '\0') {
-            ush_copy(copy, (u64)sizeof(copy), line);
-            pkg_print_db_line(copy);
-            any = 1;
-        }
-        line = next;
+    if (pkg_sqlite_foreach_installed(pkg_list_iter, &ctx) == 0) {
+        (void)puts("pkg: failed to read package database");
+        return 0;
     }
 
-    if (any == 0) {
+    if (ctx.any == 0) {
         (void)puts("pkg: no packages installed");
     }
     return 1;
 }
 
 int pkg_remove_record(const char *name, char *out_target, u64 out_target_size, int *out_found) {
-    u64 len = 0ULL;
-    u64 new_len = 0ULL;
-    char *line;
-
-    if (out_found != (int *)0) {
-        *out_found = 0;
-    }
-    if (out_target != (char *)0 && out_target_size > 0ULL) {
-        out_target[0] = '\0';
-    }
-
-    if (pkg_read_file(PKG_DB_PATH, pkg_db_buf, (u64)sizeof(pkg_db_buf), &len) == 0) {
-        pkg_db_buf[0] = '\0';
-        return 1;
-    }
-
-    pkg_db_new_buf[0] = '\0';
-    line = pkg_db_buf;
-    while (*line != '\0') {
-        char *next = line;
-        char copy[PKG_DB_LINE_MAX];
-        char *bar;
-
-        while (*next != '\0' && *next != '\n') {
-            next++;
-        }
-        if (*next == '\n') {
-            *next = '\0';
-            next++;
-        }
-
-        ush_copy(copy, (u64)sizeof(copy), line);
-        bar = strchr(copy, '|');
-        if (bar != (char *)0) {
-            *bar = '\0';
-        }
-
-        if (line[0] != '\0' && ush_streq(copy, name) != 0) {
-            char *target_start = (bar != (char *)0) ? strchr(bar + 1, '|') : (char *)0;
-            char *target_end;
-            if (out_found != (int *)0) {
-                *out_found = 1;
-            }
-            if (target_start != (char *)0 && out_target != (char *)0 && out_target_size > 0ULL) {
-                target_start++;
-                target_end = strchr(target_start, '|');
-                if (target_end != (char *)0) {
-                    *target_end = '\0';
-                }
-                ush_copy(out_target, out_target_size, target_start);
-            }
-        } else if (line[0] != '\0') {
-            if (pkg_append_text(pkg_db_new_buf, (u64)sizeof(pkg_db_new_buf), &new_len, line) == 0 ||
-                pkg_append_char(pkg_db_new_buf, (u64)sizeof(pkg_db_new_buf), &new_len, '\n') == 0) {
-                return 0;
-            }
-        }
-
-        line = next;
-    }
-
-    return pkg_write_file(PKG_DB_PATH, pkg_db_new_buf, new_len);
+    return pkg_sqlite_remove_package(name, out_target, out_target_size, out_found);
 }
 
-int pkg_remove_has_reverse_dependencies(const char *name) {
-    u64 len = 0ULL;
-    char *line;
-    int blockers = 0;
+typedef struct pkg_remove_dep_ctx {
+    const char *name;
+    int blockers;
+} pkg_remove_dep_ctx;
 
-    if (pkg_read_file(PKG_DB_PATH, pkg_db_buf, (u64)sizeof(pkg_db_buf), &len) == 0 || len == 0ULL) {
+static int pkg_remove_dep_iter(const pkg_installed_record *record, void *ctx_ptr) {
+    pkg_remove_dep_ctx *ctx = (pkg_remove_dep_ctx *)ctx_ptr;
+
+    if (record == (const pkg_installed_record *)0 || ctx == (pkg_remove_dep_ctx *)0 || ctx->name == (const char *)0) {
         return 0;
     }
 
-    line = pkg_db_buf;
-    while (*line != '\0') {
-        char *next = line;
-        char copy[PKG_DB_LINE_MAX];
-        char *pkg_name;
-        char *depends;
-
-        while (*next != '\0' && *next != '\n') {
-            next++;
+    if (ush_streq(record->name, ctx->name) == 0 && pkg_dependency_list_mentions(record->depends, ctx->name) != 0) {
+        if (ctx->blockers == 0) {
+            (void)printf("pkg: cannot remove %s, required by:\n", ctx->name);
         }
-        if (*next == '\n') {
-            *next = '\0';
-            next++;
-        }
-
-        if (line[0] != '\0') {
-            ush_copy(copy, (u64)sizeof(copy), line);
-            if (pkg_db_line_parse(copy, &pkg_name, (char **)0, (char **)0, (char **)0, &depends) != 0 &&
-                ush_streq(pkg_name, name) == 0 && pkg_dependency_list_mentions(depends, name) != 0) {
-                if (blockers == 0) {
-                    (void)printf("pkg: cannot remove %s, required by:\n", name);
-                }
-                (void)printf("  %s\n", pkg_name);
-                blockers = 1;
-            }
-        }
-
-        line = next;
+        (void)printf("  %s\n", record->name);
+        ctx->blockers = 1;
     }
 
-    if (blockers != 0) {
+    return 1;
+}
+
+int pkg_remove_has_reverse_dependencies(const char *name) {
+    pkg_remove_dep_ctx ctx;
+
+    ush_zero(&ctx, (u64)sizeof(ctx));
+    ctx.name = name;
+    if (pkg_sqlite_init() == 0) {
+        return 0;
+    }
+    if (pkg_sqlite_foreach_installed(pkg_remove_dep_iter, &ctx) == 0) {
+        return 0;
+    }
+
+    if (ctx.blockers != 0) {
         (void)puts("pkg: use pkg remove --force <name> to override");
     }
-    return blockers;
+    return ctx.blockers;
 }
 
 int pkg_cmd_remove(const char *arg) {
@@ -350,7 +293,7 @@ static int pkg_repo_set_active(const char *url) {
         return 0;
     }
 
-    if (pkg_write_file(PKG_REPO_PATH, repo, ush_strlen(repo)) == 0) {
+    if (pkg_sqlite_set_active_repo(repo) == 0) {
         (void)puts("pkg: repo write failed");
         return 0;
     }
@@ -360,58 +303,10 @@ static int pkg_repo_set_active(const char *url) {
 }
 
 static int pkg_source_find(const char *name, char *out_url, u64 out_url_size) {
-    u64 len = 0ULL;
-    char *line;
-
-    if (out_url != (char *)0 && out_url_size > 0ULL) {
-        out_url[0] = '\0';
-    }
-    if (name == (const char *)0 || pkg_safe_name(name) == 0) {
-        return 0;
-    }
-    if (pkg_read_file(PKG_SOURCES_PATH, pkg_db_buf, (u64)sizeof(pkg_db_buf), &len) == 0 || len == 0ULL) {
-        return 0;
-    }
-
-    line = pkg_db_buf;
-    while (*line != '\0') {
-        char *next = line;
-        char copy[PKG_DB_LINE_MAX];
-        char *url;
-
-        while (*next != '\0' && *next != '\n') {
-            next++;
-        }
-        if (*next == '\n') {
-            *next = '\0';
-            next++;
-        }
-
-        if (line[0] != '\0') {
-            ush_copy(copy, (u64)sizeof(copy), line);
-            url = strchr(copy, '|');
-            if (url != (char *)0) {
-                *url = '\0';
-                url++;
-                if (ush_streq(copy, name) != 0) {
-                    if (out_url != (char *)0 && out_url_size > 0ULL) {
-                        ush_copy(out_url, out_url_size, url);
-                    }
-                    return 1;
-                }
-            }
-        }
-        line = next;
-    }
-    return 0;
+    return pkg_sqlite_source_get(name, out_url, out_url_size);
 }
 
 static int pkg_source_write_or_remove(const char *target_name, const char *new_url, int remove) {
-    u64 len = 0ULL;
-    u64 new_len = 0ULL;
-    char *line;
-    int replaced = 0;
-
     if (target_name == (const char *)0 || pkg_safe_name(target_name) == 0) {
         return 0;
     }
@@ -420,111 +315,49 @@ static int pkg_source_write_or_remove(const char *target_name, const char *new_u
         return 0;
     }
 
-    if (pkg_read_file(PKG_SOURCES_PATH, pkg_db_buf, (u64)sizeof(pkg_db_buf), &len) == 0) {
-        pkg_db_buf[0] = '\0';
-    }
-    (void)len;
-
-    pkg_db_new_buf[0] = '\0';
-    line = pkg_db_buf;
-    while (*line != '\0') {
-        char *next = line;
-        char copy[PKG_DB_LINE_MAX];
-        char *url;
-
-        while (*next != '\0' && *next != '\n') {
-            next++;
-        }
-        if (*next == '\n') {
-            *next = '\0';
-            next++;
-        }
-
-        if (line[0] != '\0') {
-            ush_copy(copy, (u64)sizeof(copy), line);
-            url = strchr(copy, '|');
-            if (url != (char *)0) {
-                *url = '\0';
-            }
-            if (ush_streq(copy, target_name) != 0) {
-                replaced = 1;
-                if (remove == 0) {
-                    if (pkg_append_text(pkg_db_new_buf, (u64)sizeof(pkg_db_new_buf), &new_len, target_name) == 0 ||
-                        pkg_append_char(pkg_db_new_buf, (u64)sizeof(pkg_db_new_buf), &new_len, '|') == 0 ||
-                        pkg_append_text(pkg_db_new_buf, (u64)sizeof(pkg_db_new_buf), &new_len, new_url) == 0 ||
-                        pkg_append_char(pkg_db_new_buf, (u64)sizeof(pkg_db_new_buf), &new_len, '\n') == 0) {
-                        return 0;
-                    }
-                }
-            } else if (url != (char *)0) {
-                if (pkg_append_text(pkg_db_new_buf, (u64)sizeof(pkg_db_new_buf), &new_len, line) == 0 ||
-                    pkg_append_char(pkg_db_new_buf, (u64)sizeof(pkg_db_new_buf), &new_len, '\n') == 0) {
-                    return 0;
-                }
-            }
-        }
-        line = next;
+    if (remove != 0) {
+        return pkg_sqlite_source_remove(target_name);
     }
 
-    if (remove == 0 && replaced == 0) {
-        if (pkg_append_text(pkg_db_new_buf, (u64)sizeof(pkg_db_new_buf), &new_len, target_name) == 0 ||
-            pkg_append_char(pkg_db_new_buf, (u64)sizeof(pkg_db_new_buf), &new_len, '|') == 0 ||
-            pkg_append_text(pkg_db_new_buf, (u64)sizeof(pkg_db_new_buf), &new_len, new_url) == 0 ||
-            pkg_append_char(pkg_db_new_buf, (u64)sizeof(pkg_db_new_buf), &new_len, '\n') == 0) {
-            return 0;
-        }
+    return pkg_sqlite_source_set(target_name, new_url);
+}
+
+static int pkg_source_list_iter(const pkg_source_record *record, void *ctx_ptr) {
+    pkg_source_list_ctx *ctx = (pkg_source_list_ctx *)ctx_ptr;
+
+    if (record == (const pkg_source_record *)0 || ctx == (pkg_source_list_ctx *)0) {
+        return 0;
     }
 
-    return pkg_write_file(PKG_SOURCES_PATH, pkg_db_new_buf, new_len);
+    (void)printf("%-18s %-7s %s\n", record->name,
+                 (ctx->active != (const char *)0 && ush_streq(record->url, ctx->active) != 0) ? "*" : "", record->url);
+    ctx->any = 1;
+    return 1;
 }
 
 static int pkg_source_list(void) {
     char active[PKG_URL_MAX];
-    u64 len = 0ULL;
-    char *line;
-    int any = 0;
+    pkg_source_list_ctx ctx;
 
     if (pkg_load_repo(active, (u64)sizeof(active)) == 0) {
         active[0] = '\0';
     }
-    if (pkg_read_file(PKG_SOURCES_PATH, pkg_db_buf, (u64)sizeof(pkg_db_buf), &len) == 0 || len == 0ULL) {
-        (void)puts("pkg: no named sources");
-        if (active[0] != '\0') {
-            (void)printf("* current %s\n", active);
-        }
-        return 1;
+
+    ush_zero(&ctx, (u64)sizeof(ctx));
+    ctx.active = active;
+    if (pkg_sqlite_init() == 0) {
+        (void)puts("pkg: cannot open package database");
+        return 0;
     }
 
     (void)puts("name               active  url");
     (void)puts("------------------------------------------------------------");
-    line = pkg_db_buf;
-    while (*line != '\0') {
-        char *next = line;
-        char copy[PKG_DB_LINE_MAX];
-        char *url;
-
-        while (*next != '\0' && *next != '\n') {
-            next++;
-        }
-        if (*next == '\n') {
-            *next = '\0';
-            next++;
-        }
-
-        if (line[0] != '\0') {
-            ush_copy(copy, (u64)sizeof(copy), line);
-            url = strchr(copy, '|');
-            if (url != (char *)0) {
-                *url = '\0';
-                url++;
-                (void)printf("%-18s %-7s %s\n", copy, ush_streq(url, active) != 0 ? "*" : "", url);
-                any = 1;
-            }
-        }
-        line = next;
+    if (pkg_sqlite_foreach_sources(pkg_source_list_iter, &ctx) == 0) {
+        (void)puts("pkg: failed to read sources database");
+        return 0;
     }
 
-    if (any == 0) {
+    if (ctx.any == 0) {
         (void)puts("pkg: no named sources");
     }
     return 1;
@@ -635,7 +468,7 @@ int pkg_cmd_repo(const char *arg) {
             return 0;
         }
         if (pkg_load_repo(active, (u64)sizeof(active)) != 0 && ush_streq(active, url) != 0) {
-            (void)cleonos_sys_fs_remove(PKG_REPO_PATH);
+            (void)pkg_sqlite_set_active_repo(PKG_DEFAULT_REPO);
             (void)puts("pkg: removed active repo source; repo reset to default");
         }
         (void)printf("pkg: repo source %s removed\n", name);
@@ -709,8 +542,7 @@ int pkg_cmd_clean(void) {
 int pkg_cmd_info(const char *arg) {
     char name[PKG_NAME_MAX];
     const char *rest = "";
-    u64 len = 0ULL;
-    char *line;
+    pkg_installed_record record;
 
     if (arg == (const char *)0 || ush_split_first_and_rest(arg, name, (u64)sizeof(name), &rest) == 0 ||
         pkg_safe_name(name) == 0) {
@@ -723,53 +555,28 @@ int pkg_cmd_info(const char *arg) {
         return 0;
     }
 
-    if (pkg_read_file(PKG_DB_PATH, pkg_db_buf, (u64)sizeof(pkg_db_buf), &len) == 0 || len == 0ULL) {
+    if (pkg_sqlite_get_installed_record(name, &record) == 0) {
         (void)puts("pkg: package not installed");
         return 0;
     }
 
-    line = pkg_db_buf;
-    while (*line != '\0') {
-        char *next = line;
-        char copy[PKG_DB_LINE_MAX];
-        char *pkg_name;
-        char *version;
-        char *target;
-        char *source;
-        char *depends;
-
-        while (*next != '\0' && *next != '\n') {
-            next++;
-        }
-        if (*next == '\n') {
-            *next = '\0';
-            next++;
-        }
-
-        ush_copy(copy, (u64)sizeof(copy), line);
-        if (pkg_db_line_parse(copy, &pkg_name, &version, &target, &source, &depends) != 0 && ush_streq(pkg_name, name) != 0) {
-            (void)printf("name: %s\n", name);
-            (void)printf("version: %s\n", version);
-            (void)printf("target: %s\n", target);
-            (void)printf("source: %s\n", source);
-            if (depends[0] != '\0') {
-                (void)printf("depends: %s\n", depends);
-            }
-            return 1;
-        }
-
-        line = next;
+    (void)printf("name: %s\n", record.name);
+    (void)printf("version: %s\n", record.version);
+    (void)printf("target: %s\n", record.target);
+    (void)printf("source: %s\n", record.source);
+    if (record.depends[0] != '\0') {
+        (void)printf("depends: %s\n", record.depends);
     }
-
-    (void)puts("pkg: package not installed");
-    return 0;
+    if (record.sha256[0] != '\0') {
+        (void)printf("sha256: %s\n", record.sha256);
+    }
+    return 1;
 }
 
 int pkg_cmd_files(const char *arg) {
     char name[PKG_NAME_MAX];
     const char *rest = "";
-    u64 len = 0ULL;
-    char *line;
+    pkg_installed_record record;
 
     if (arg == (const char *)0 || ush_split_first_and_rest(arg, name, (u64)sizeof(name), &rest) == 0 ||
         pkg_safe_name(name) == 0) {
@@ -782,48 +589,22 @@ int pkg_cmd_files(const char *arg) {
         return 0;
     }
 
-    if (pkg_read_file(PKG_DB_PATH, pkg_db_buf, (u64)sizeof(pkg_db_buf), &len) == 0 || len == 0ULL) {
+    if (pkg_sqlite_get_installed_record(name, &record) == 0) {
         (void)puts("pkg: package not installed");
         return 0;
     }
 
-    line = pkg_db_buf;
-    while (*line != '\0') {
-        char *next = line;
-        char copy[PKG_DB_LINE_MAX];
-        char *pkg_name;
-        char *version;
-        char *target;
-
-        while (*next != '\0' && *next != '\n') {
-            next++;
+    (void)printf("%s %s files:\n", record.name, record.version);
+    if (record.target[0] != '\0') {
+        (void)printf("  %s", record.target);
+        if (cleonos_sys_fs_stat_type(record.target) == 1ULL) {
+            (void)printf(" (%llu bytes)", (unsigned long long)cleonos_sys_fs_stat_size(record.target));
+        } else {
+            (void)printf(" (missing)");
         }
-        if (*next == '\n') {
-            *next = '\0';
-            next++;
-        }
-
-        ush_copy(copy, (u64)sizeof(copy), line);
-        if (pkg_db_line_parse(copy, &pkg_name, &version, &target, (char **)0, (char **)0) != 0 &&
-            ush_streq(pkg_name, name) != 0) {
-            (void)printf("%s %s files:\n", pkg_name, version);
-            if (target[0] != '\0') {
-                (void)printf("  %s", target);
-                if (cleonos_sys_fs_stat_type(target) == 1ULL) {
-                    (void)printf(" (%llu bytes)", (unsigned long long)cleonos_sys_fs_stat_size(target));
-                } else {
-                    (void)printf(" (missing)");
-                }
-                (void)puts("");
-            }
-            return 1;
-        }
-
-        line = next;
+        (void)puts("");
     }
-
-    (void)puts("pkg: package not installed");
-    return 0;
+    return 1;
 }
 
 void pkg_print_remote_header(void) {
@@ -1024,74 +805,46 @@ int pkg_cmd_filter_remote(const char *api, const char *label, const char *arg) {
 }
 
 int pkg_find_installed_version_in_db(const char *db_text, const char *name, char *out_version, u64 out_size) {
-    const char *line;
-
-    if (out_version != (char *)0 && out_size > 0ULL) {
-        out_version[0] = '\0';
-    }
-    if (db_text == (const char *)0 || name == (const char *)0 || pkg_safe_name(name) == 0) {
-        return 0;
-    }
-
-    line = db_text;
-    while (*line != '\0') {
-        const char *next = line;
-        char copy[PKG_DB_LINE_MAX];
-        u64 len = 0ULL;
-        char *version;
-
-        while (*next != '\0' && *next != '\n') {
-            if (len + 1ULL < (u64)sizeof(copy)) {
-                copy[len] = *next;
-                len++;
-            }
-            next++;
-        }
-        copy[len] = '\0';
-        if (*next == '\n') {
-            next++;
-        }
-
-        version = strchr(copy, '|');
-        if (version != (char *)0) {
-            *version = '\0';
-            version++;
-            if (ush_streq(copy, name) != 0) {
-                char *target = strchr(version, '|');
-                if (target != (char *)0) {
-                    *target = '\0';
-                }
-                if (out_version != (char *)0 && out_size > 0ULL) {
-                    ush_copy(out_version, out_size, version);
-                }
-                return 1;
-            }
-        }
-
-        line = next;
-    }
-
-    return 0;
+    (void)db_text;
+    return pkg_sqlite_get_installed_version(name, out_version, out_size);
 }
 
 int pkg_load_installed_db_for_remote(void) {
-    u64 len = 0ULL;
+    u64 count = 0ULL;
 
-    if (pkg_read_file(PKG_DB_PATH, pkg_db_buf, (u64)sizeof(pkg_db_buf), &len) == 0 || len == 0ULL) {
-        pkg_db_buf[0] = '\0';
+    if (pkg_sqlite_count_installed(&count) == 0 || count == 0ULL) {
+        return 0;
+    }
+    return 1;
+}
+
+static int pkg_cmd_update_match_remote(const pkg_remote_package *package, void *ctx_ptr) {
+    pkg_update_ctx *ctx = (pkg_update_ctx *)ctx_ptr;
+    char installed_version[PKG_VERSION_MAX];
+
+    if (package == (const pkg_remote_package *)0 || ctx == (pkg_update_ctx *)0) {
         return 0;
     }
 
+    if (pkg_sqlite_get_installed_version(package->name, installed_version, (u64)sizeof(installed_version)) != 0 &&
+        strcmp(installed_version, package->version) != 0) {
+        if (ctx->any == 0) {
+            (void)puts("name               installed    remote");
+            (void)puts("-----------------------------------------------");
+        }
+        (void)printf("%-18s %-12s %s\n", package->name, installed_version, package->version);
+        ctx->any = 1;
+    }
     return 1;
 }
 
 int pkg_cmd_update(void) {
     const char *cursor;
     pkg_remote_package package;
-    char installed_version[PKG_VERSION_MAX];
     u64 len = 0ULL;
-    int any = 0;
+    pkg_update_ctx ctx;
 
+    ush_zero(&ctx, (u64)sizeof(ctx));
     if (pkg_load_installed_db_for_remote() == 0) {
         (void)puts("pkg: no packages installed");
         return 1;
@@ -1109,19 +862,12 @@ int pkg_cmd_update(void) {
     }
 
     while (pkg_remote_next_package(&cursor, &package) != 0) {
-        if (pkg_find_installed_version_in_db(pkg_db_buf, package.name, installed_version,
-                                             (u64)sizeof(installed_version)) != 0 &&
-            strcmp(installed_version, package.version) != 0) {
-            if (any == 0) {
-                (void)puts("name               installed    remote");
-                (void)puts("-----------------------------------------------");
-            }
-            (void)printf("%-18s %-12s %s\n", package.name, installed_version, package.version);
-            any = 1;
+        if (pkg_cmd_update_match_remote(&package, &ctx) == 0) {
+            return 0;
         }
     }
 
-    if (any == 0) {
+    if (ctx.any == 0) {
         (void)puts("pkg: all installed packages are up to date");
     }
     return 1;
@@ -1161,8 +907,7 @@ int pkg_collect_outdated_names(u64 *out_count, int *out_no_installed) {
     }
 
     while (pkg_remote_next_package(&cursor, &package) != 0) {
-        if (pkg_find_installed_version_in_db(pkg_db_buf, package.name, installed_version,
-                                             (u64)sizeof(installed_version)) != 0 &&
+        if (pkg_sqlite_get_installed_version(package.name, installed_version, (u64)sizeof(installed_version)) != 0 &&
             strcmp(installed_version, package.version) != 0) {
             if (count >= (u64)PKG_UPGRADE_ALL_MAX) {
                 (void)puts("pkg: too many pending upgrades; upgrade packages one by one");
@@ -1232,7 +977,7 @@ int pkg_cmd_upgrade(const ush_state *sh, const char *arg) {
     }
 
     if (pkg_load_installed_db_for_remote() == 0 ||
-        pkg_find_installed_version_in_db(pkg_db_buf, name, installed_version, (u64)sizeof(installed_version)) == 0) {
+        pkg_sqlite_get_installed_version(name, installed_version, (u64)sizeof(installed_version)) == 0) {
         (void)puts("pkg: package is not installed; use pkg install <name>");
         return 0;
     }

@@ -1,5 +1,15 @@
 #include "pkg_internal.h"
 
+typedef struct pkg_doctor_db_ctx {
+    int ok;
+} pkg_doctor_db_ctx;
+
+typedef struct pkg_verify_ctx {
+    const char *filter;
+    int any;
+    int ok_all;
+} pkg_verify_ctx;
+
 int pkg_lock_acquire(void) {
     char old_lock[64];
     char lock_text[64];
@@ -413,10 +423,26 @@ static void pkg_doctor_result(const char *name, int ok, const char *detail) {
     (void)puts("");
 }
 
+static int pkg_doctor_db_iter(const pkg_installed_record *record, void *ctx_ptr) {
+    pkg_doctor_db_ctx *ctx = (pkg_doctor_db_ctx *)ctx_ptr;
+
+    if (record == (const pkg_installed_record *)0 || ctx == (pkg_doctor_db_ctx *)0) {
+        return 0;
+    }
+
+    if (pkg_safe_name(record->name) == 0 || record->version[0] == '\0' || pkg_target_is_allowed(record->target) == 0) {
+        ctx->ok = 0;
+        return 0;
+    }
+
+    return 1;
+}
+
 int pkg_cmd_doctor(void) {
     char repo[PKG_URL_MAX];
     char mount_path[USH_PATH_MAX];
     u64 len = 0ULL;
+    u64 count = 0ULL;
     int ok_all = 1;
     int ok;
 
@@ -461,36 +487,27 @@ int pkg_cmd_doctor(void) {
         ok_all = 0;
     }
 
-    if (pkg_read_file(PKG_DB_PATH, pkg_db_buf, (u64)sizeof(pkg_db_buf), &len) == 0 || len == 0ULL) {
-        pkg_doctor_result("installed.db", 1, "empty or not created yet");
+    ok = pkg_sqlite_init();
+    pkg_doctor_result("pkg.db", ok, ok != 0 ? "sqlite opened" : "sqlite open failed");
+    if (ok == 0) {
+        ok_all = 0;
     } else {
-        char *line = pkg_db_buf;
-        ok = 1;
-        while (*line != '\0') {
-            char *next = line;
-            char copy[PKG_DB_LINE_MAX];
-            char *name;
-            char *version;
-            char *target;
+        pkg_doctor_db_ctx db_ctx;
 
-            while (*next != '\0' && *next != '\n') {
-                next++;
-            }
-            if (*next == '\n') {
-                *next = '\0';
-                next++;
-            }
-            if (line[0] != '\0') {
-                ush_copy(copy, (u64)sizeof(copy), line);
-                if (pkg_db_line_parse_ex(copy, &name, &version, &target, (char **)0, (char **)0, (char **)0) == 0 ||
-                    pkg_safe_name(name) == 0 || version[0] == '\0' || pkg_target_is_allowed(target) == 0) {
-                    ok = 0;
-                    break;
-                }
-            }
-            line = next;
+        db_ctx.ok = 1;
+        if (pkg_sqlite_count_installed(&count) == 0) {
+            ok = 0;
+        } else if (count == 0ULL) {
+            ok = 1;
+        } else if (pkg_sqlite_foreach_installed(pkg_doctor_db_iter, &db_ctx) == 0) {
+            ok = 0;
+        } else {
+            ok = db_ctx.ok;
         }
-        pkg_doctor_result("installed.db", ok, ok != 0 ? "parseable" : "corrupted record found");
+
+        pkg_doctor_result("installed packages", ok,
+                          (ok != 0) ? ((count == 0ULL) ? "empty or not created yet" : "records valid")
+                                     : "corrupted record found");
         if (ok == 0) {
             ok_all = 0;
         }
@@ -512,55 +529,46 @@ int pkg_cmd_doctor(void) {
     return ok_all;
 }
 
-static int pkg_verify_one_record(char *record, const char *filter, int *io_any, int *io_ok_all) {
-    char *name;
-    char *version;
-    char *target;
-    char *source;
-    char *depends;
-    char *sha256;
+static int pkg_verify_one_record(const pkg_installed_record *record, const char *filter, int *io_any, int *io_ok_all) {
     char actual[PKG_SHA256_MAX];
     int ok = 1;
 
-    if (pkg_db_line_parse_ex(record, &name, &version, &target, &source, &depends, &sha256) == 0) {
-        (void)puts("pkg verify: corrupted installed.db record");
+    if (record == (const pkg_installed_record *)0) {
+        (void)puts("pkg verify: corrupted package database record");
         *io_ok_all = 0;
         return 1;
     }
-    (void)version;
-    (void)source;
-    (void)depends;
 
-    if (filter != (const char *)0 && filter[0] != '\0' && ush_streq(name, filter) == 0) {
+    if (filter != (const char *)0 && filter[0] != '\0' && ush_streq(record->name, filter) == 0) {
         return 1;
     }
     *io_any = 1;
 
-    (void)printf("%s:\n", name);
-    if (pkg_target_is_allowed(target) == 0) {
-        (void)printf("  target: FAIL invalid target %s\n", target);
+    (void)printf("%s:\n", record->name);
+    if (pkg_target_is_allowed(record->target) == 0) {
+        (void)printf("  target: FAIL invalid target %s\n", record->target);
         ok = 0;
     } else {
-        (void)printf("  target: %s\n", target);
+        (void)printf("  target: %s\n", record->target);
     }
 
-    if (cleonos_sys_fs_stat_type(target) != 1ULL) {
+    if (cleonos_sys_fs_stat_type(record->target) != 1ULL) {
         (void)puts("  file: FAIL missing");
         ok = 0;
     } else {
-        (void)printf("  file: OK %llu bytes\n", (unsigned long long)cleonos_sys_fs_stat_size(target));
+        (void)printf("  file: OK %llu bytes\n", (unsigned long long)cleonos_sys_fs_stat_size(record->target));
     }
 
-    if (sha256 == (char *)0 || sha256[0] == '\0') {
+    if (record->sha256[0] == '\0') {
         (void)puts("  sha256: WARN no checksum recorded");
-    } else if (pkg_hex_digest_is_valid(sha256) == 0) {
-        (void)puts("  sha256: FAIL invalid checksum in installed.db");
+    } else if (pkg_hex_digest_is_valid(record->sha256) == 0) {
+        (void)puts("  sha256: FAIL invalid checksum in pkg.db");
         ok = 0;
-    } else if (pkg_sha256_file_hex(target, actual) == 0) {
+    } else if (pkg_sha256_file_hex(record->target, actual) == 0) {
         (void)puts("  sha256: FAIL cannot calculate");
         ok = 0;
-    } else if (pkg_hex_digest_equals(sha256, actual) == 0) {
-        (void)printf("  sha256: FAIL expected %s\n", sha256);
+    } else if (pkg_hex_digest_equals(record->sha256, actual) == 0) {
+        (void)printf("  sha256: FAIL expected %s\n", record->sha256);
         (void)printf("          actual   %s\n", actual);
         ok = 0;
     } else {
@@ -573,13 +581,21 @@ static int pkg_verify_one_record(char *record, const char *filter, int *io_any, 
     return 1;
 }
 
+static int pkg_verify_iter(const pkg_installed_record *record, void *ctx_ptr) {
+    pkg_verify_ctx *ctx = (pkg_verify_ctx *)ctx_ptr;
+
+    if (ctx == (pkg_verify_ctx *)0) {
+        return 0;
+    }
+
+    return pkg_verify_one_record(record, ctx->filter, &ctx->any, &ctx->ok_all);
+}
+
 int pkg_cmd_verify(const char *arg) {
     char name[PKG_NAME_MAX];
     const char *rest = "";
-    u64 len = 0ULL;
-    char *line;
-    int any = 0;
-    int ok_all = 1;
+    u64 count = 0ULL;
+    pkg_verify_ctx ctx;
 
     name[0] = '\0';
     if (arg != (const char *)0 && arg[0] != '\0') {
@@ -590,35 +606,21 @@ int pkg_cmd_verify(const char *arg) {
         }
     }
 
-    if (pkg_read_file(PKG_DB_PATH, pkg_db_buf, (u64)sizeof(pkg_db_buf), &len) == 0 || len == 0ULL) {
+    if (pkg_sqlite_count_installed(&count) == 0 || count == 0ULL) {
         (void)puts("pkg: no packages installed");
         return 0;
     }
 
-    line = pkg_db_buf;
-    while (*line != '\0') {
-        char *next = line;
-        char copy[PKG_DB_LINE_MAX];
-
-        while (*next != '\0' && *next != '\n') {
-            next++;
-        }
-        if (*next == '\n') {
-            *next = '\0';
-            next++;
-        }
-        if (line[0] != '\0') {
-            ush_copy(copy, (u64)sizeof(copy), line);
-            if (pkg_verify_one_record(copy, name, &any, &ok_all) == 0) {
-                ok_all = 0;
-            }
-        }
-        line = next;
+    ush_zero(&ctx, (u64)sizeof(ctx));
+    ctx.filter = name;
+    ctx.ok_all = 1;
+    if (pkg_sqlite_foreach_installed(pkg_verify_iter, &ctx) == 0) {
+        return 0;
     }
 
-    if (any == 0) {
+    if (ctx.any == 0) {
         (void)puts("pkg: package not installed");
         return 0;
     }
-    return ok_all;
+    return ctx.ok_all;
 }

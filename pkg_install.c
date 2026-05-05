@@ -218,18 +218,13 @@ int pkg_find_installed_version_text(const char *db_text, const char *name, char 
 }
 
 int pkg_installed_dependency_satisfies(const pkg_dependency *dep) {
-    u64 len = 0ULL;
     char installed_version[PKG_VERSION_MAX];
 
     if (dep == (const pkg_dependency *)0 || pkg_safe_name(dep->name) == 0) {
         return 0;
     }
 
-    if (pkg_read_file(PKG_DB_PATH, pkg_db_buf, (u64)sizeof(pkg_db_buf), &len) == 0 || len == 0ULL) {
-        return 0;
-    }
-
-    if (pkg_find_installed_version_text(pkg_db_buf, dep->name, installed_version, (u64)sizeof(installed_version)) == 0) {
+    if (pkg_sqlite_get_installed_version(dep->name, installed_version, (u64)sizeof(installed_version)) == 0) {
         return 0;
     }
 
@@ -454,10 +449,6 @@ int pkg_resolve_local_path(const ush_state *sh, const char *arg, char *out, u64 
 }
 
 int pkg_record_install(const pkg_manifest *manifest, const char *source) {
-    u64 old_len = 0ULL;
-    u64 new_len = 0ULL;
-    char *line;
-
     if (manifest == (const pkg_manifest *)0 || manifest->name[0] == '\0' || manifest->target[0] == '\0') {
         return 0;
     }
@@ -467,64 +458,11 @@ int pkg_record_install(const pkg_manifest *manifest, const char *source) {
         return 0;
     }
 
-    pkg_db_new_buf[0] = '\0';
-    if (pkg_read_file(PKG_DB_PATH, pkg_db_buf, (u64)sizeof(pkg_db_buf), &old_len) == 0) {
-        pkg_db_buf[0] = '\0';
-        old_len = 0ULL;
-    }
-    (void)old_len;
-
-    line = pkg_db_buf;
-    while (*line != '\0') {
-        char *next = line;
-        char line_copy[PKG_DB_LINE_MAX];
-        char *bar;
-
-        while (*next != '\0' && *next != '\n') {
-            next++;
-        }
-        if (*next == '\n') {
-            *next = '\0';
-            next++;
-        }
-
-        ush_copy(line_copy, (u64)sizeof(line_copy), line);
-        bar = strchr(line_copy, '|');
-        if (bar != (char *)0) {
-            *bar = '\0';
-        }
-
-        if (line[0] != '\0' && ush_streq(line_copy, manifest->name) == 0) {
-            if (pkg_append_text(pkg_db_new_buf, (u64)sizeof(pkg_db_new_buf), &new_len, line) == 0 ||
-                pkg_append_char(pkg_db_new_buf, (u64)sizeof(pkg_db_new_buf), &new_len, '\n') == 0) {
-                return 0;
-            }
-        }
-        line = next;
-    }
-
-    if (pkg_append_text(pkg_db_new_buf, (u64)sizeof(pkg_db_new_buf), &new_len, manifest->name) == 0 ||
-        pkg_append_char(pkg_db_new_buf, (u64)sizeof(pkg_db_new_buf), &new_len, '|') == 0 ||
-        pkg_append_text(pkg_db_new_buf, (u64)sizeof(pkg_db_new_buf), &new_len, manifest->version) == 0 ||
-        pkg_append_char(pkg_db_new_buf, (u64)sizeof(pkg_db_new_buf), &new_len, '|') == 0 ||
-        pkg_append_text(pkg_db_new_buf, (u64)sizeof(pkg_db_new_buf), &new_len, manifest->target) == 0 ||
-        pkg_append_char(pkg_db_new_buf, (u64)sizeof(pkg_db_new_buf), &new_len, '|') == 0 ||
-        pkg_append_text(pkg_db_new_buf, (u64)sizeof(pkg_db_new_buf), &new_len,
-                        (source != (const char *)0) ? source : "unknown") == 0 ||
-        pkg_append_char(pkg_db_new_buf, (u64)sizeof(pkg_db_new_buf), &new_len, '|') == 0 ||
-        pkg_append_text(pkg_db_new_buf, (u64)sizeof(pkg_db_new_buf), &new_len, manifest->depends) == 0 ||
-        pkg_append_char(pkg_db_new_buf, (u64)sizeof(pkg_db_new_buf), &new_len, '|') == 0 ||
-        pkg_append_text(pkg_db_new_buf, (u64)sizeof(pkg_db_new_buf), &new_len, manifest->sha256) == 0 ||
-        pkg_append_char(pkg_db_new_buf, (u64)sizeof(pkg_db_new_buf), &new_len, '\n') == 0) {
-        return 0;
-    }
-
-    return pkg_write_file(PKG_DB_PATH, pkg_db_new_buf, new_len);
+    return pkg_sqlite_record_install(manifest, source);
 }
 
 int pkg_install_elf_file(const pkg_manifest *manifest, const char *elf_path, const char *source) {
     char actual_sha256[PKG_SHA256_MAX];
-    u64 db_len = 0ULL;
     char installed_version[PKG_VERSION_MAX];
 
     if (manifest == (const pkg_manifest *)0 || elf_path == (const char *)0) {
@@ -537,9 +475,7 @@ int pkg_install_elf_file(const pkg_manifest *manifest, const char *elf_path, con
     }
 
     if (pkg_force_reinstall == 0 &&
-        pkg_read_file(PKG_DB_PATH, pkg_db_buf, (u64)sizeof(pkg_db_buf), &db_len) != 0 &&
-        pkg_find_installed_version_text(pkg_db_buf, manifest->name, installed_version,
-                                        (u64)sizeof(installed_version)) != 0) {
+        pkg_sqlite_get_installed_version(manifest->name, installed_version, (u64)sizeof(installed_version)) != 0) {
         (void)printf("pkg: %s is already installed; use pkg install --reinstall %s\n", manifest->name,
                      manifest->name);
         return 0;

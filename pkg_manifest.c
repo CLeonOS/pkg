@@ -273,6 +273,10 @@ int pkg_load_repo(char *out, u64 out_size) {
         return 0;
     }
 
+    if (pkg_sqlite_get_active_repo(out, out_size) != 0 && out[0] != '\0') {
+        return 1;
+    }
+
     if (pkg_read_file(PKG_REPO_PATH, pkg_text_buf, (u64)sizeof(pkg_text_buf), &got) != 0 && got > 0ULL) {
         trimmed = pkg_trim_mut(pkg_text_buf);
         if (trimmed[0] != '\0') {

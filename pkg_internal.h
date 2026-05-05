@@ -10,6 +10,7 @@
 #include <cJSON.h>
 
 #define PKG_DB_DIR "/system/pkg"
+#define PKG_SQLITE_PATH "/system/pkg/pkg.db"
 #define PKG_DB_PATH "/system/pkg/installed.db"
 #define PKG_LOCK_PATH "/system/pkg/lock"
 #define PKG_REPO_PATH "/system/pkg/repo.conf"
@@ -95,6 +96,23 @@ typedef struct pkg_plan_item {
     int download;
     int overwrite;
 } pkg_plan_item;
+
+typedef struct pkg_installed_record {
+    char name[PKG_NAME_MAX];
+    char version[PKG_VERSION_MAX];
+    char target[USH_PATH_MAX];
+    char source[PKG_URL_MAX];
+    char depends[PKG_DEPENDS_MAX];
+    char sha256[PKG_SHA256_MAX];
+} pkg_installed_record;
+
+typedef struct pkg_source_record {
+    char name[PKG_NAME_MAX];
+    char url[PKG_URL_MAX];
+} pkg_source_record;
+
+typedef int (*pkg_installed_iter_fn)(const pkg_installed_record *record, void *ctx);
+typedef int (*pkg_source_iter_fn)(const pkg_source_record *record, void *ctx);
 
 extern char pkg_text_buf[PKG_TEXT_MAX];
 extern char pkg_db_buf[PKG_TEXT_MAX];
@@ -193,6 +211,19 @@ int pkg_install_url_elf(const char *url);
 int pkg_install_repo_package_with_depth(const ush_state *sh, const char *name, const char *constraint_op,
                                                const char *constraint_version, u64 depth);
 int pkg_install_repo_package(const ush_state *sh, const char *name);
+int pkg_sqlite_init(void);
+int pkg_sqlite_record_install(const pkg_manifest *manifest, const char *source);
+int pkg_sqlite_get_installed_version(const char *name, char *out_version, u64 out_size);
+int pkg_sqlite_get_installed_record(const char *name, pkg_installed_record *out_record);
+int pkg_sqlite_remove_package(const char *name, char *out_target, u64 out_target_size, int *out_found);
+int pkg_sqlite_count_installed(u64 *out_count);
+int pkg_sqlite_foreach_installed(pkg_installed_iter_fn fn, void *ctx);
+int pkg_sqlite_source_get(const char *name, char *out_url, u64 out_url_size);
+int pkg_sqlite_source_set(const char *name, const char *url);
+int pkg_sqlite_source_remove(const char *name);
+int pkg_sqlite_foreach_sources(pkg_source_iter_fn fn, void *ctx);
+int pkg_sqlite_get_active_repo(char *out, u64 out_size);
+int pkg_sqlite_set_active_repo(const char *url);
 int pkg_lock_acquire(void);
 void pkg_lock_release(void);
 void pkg_plan_reset(void);
