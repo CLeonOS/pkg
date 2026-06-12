@@ -38,7 +38,7 @@ pkg clean
 ```
 
 Installed applications are copied to `/shell/<name>.elf` by default and are
-tracked in `/system/pkg/installed.db`.
+tracked in `/system/databases/pkg/installed.db`.
 
 Remote commands use the repository configured by `pkg repo`:
 
@@ -59,8 +59,8 @@ pkg repo use main
 pkg repo remove main
 ```
 
-Named repositories are stored in `/system/pkg/sources.db`. The active repository
-is still stored in `/system/pkg/repo.conf`, so existing install/search/update
+Named repositories are stored in `/system/databases/pkg/sources.db`. The active repository
+is still stored in `/system/databases/pkg/repo.conf`, so existing install/search/update
 commands continue to use the same repository path. `pkg source ...` remains as a
 compatibility alias for `pkg repo ...`.
 
@@ -86,7 +86,7 @@ pkg clean
 
 `pkg install --dry-run` resolves dependencies, target paths, download sizes when
 the repository provides them, and whether an install would overwrite an existing
-ELF. It does not write `/shell` or `/system/pkg/installed.db`.
+ELF. It does not write `/shell` or `/system/databases/pkg/installed.db`.
 
 `pkg install --reinstall <name>` and `pkg reinstall <name>` force a fresh
 install of an already installed package. Normal `pkg install <name>` refuses to
@@ -98,11 +98,11 @@ the primary ELF target, typically `/shell/<name>.elf`; the command is structured
 so future multi-file packages can add more entries without changing the user
 interface.
 
-Write operations use `/system/pkg/lock` to avoid concurrent installers changing
+Write operations use `/system/databases/pkg/lock` to avoid concurrent installers changing
 `installed.db` or `/shell/*.elf` at the same time. Stale locks owned by exited
 processes are ignored automatically.
 
-`pkg doctor` checks the network stack, repository API, `/system/pkg` and
+`pkg doctor` checks the network stack, repository API, `/system/databases/pkg` and
 `/shell` write probes, `installed.db` parsing, and disk presence/mount status.
 The current kernel does not expose free-space accounting yet, so doctor reports
 disk capacity and uses write probes instead of an exact free-byte check.
@@ -119,10 +119,10 @@ installations without a recorded checksum report a warning instead of failing.
 /temp/pkg_api.json
 /temp/.ush_cmd_ctx.bin
 /temp/.ush_cmd_ret.bin
-/system/pkg/lock
+/system/databases/pkg/lock
 ```
 
-If `/system/pkg/lock` belongs to a still-running process, `pkg clean` refuses to
+If `/system/databases/pkg/lock` belongs to a still-running process, `pkg clean` refuses to
 run so it does not delete files from an active install.
 
 ## Manifest Format
@@ -133,7 +133,7 @@ run so it does not delete files from an active install.
 format=cleonos-pkg-v1
 name=hello
 version=1.0.0
-target=/shell/hello.elf
+target=/shell/apps/hello.elf
 url=http://10.0.2.2/pkg/index.php?download=hello
 description=Hello from the CLeonOS kit.
 depends=libfoo>=1.0.0,libbar
@@ -149,7 +149,7 @@ Local manifests can use a local ELF path instead:
 format=cleonos-pkg-v1
 name=hello
 version=1.0.0
-target=/shell/hello.elf
+target=/shell/apps/hello.elf
 elf=hello.elf
 depends=libfoo>=1.0.0,libbar
 category=demo

@@ -19,7 +19,7 @@ int pkg_lock_acquire(void) {
     cleonos_proc_snapshot snap;
 
     if (pkg_ensure_db_dir() == 0) {
-        (void)puts("pkg: cannot create /system/pkg");
+        (void)puts("pkg: cannot create /system/databases/pkg");
         return 0;
     }
 
@@ -43,7 +43,7 @@ int pkg_lock_acquire(void) {
     }
 
     if (pkg_write_file(PKG_LOCK_PATH, lock_text, (u64)ret) == 0) {
-        (void)puts("pkg: cannot create /system/pkg/lock");
+        (void)puts("pkg: cannot create /system/databases/pkg/lock");
         return 0;
     }
 
@@ -186,7 +186,7 @@ int pkg_plan_add_manifest(const ush_state *sh, pkg_manifest *manifest, const cha
         return 0;
     }
     if (pkg_target_is_allowed(manifest->target) == 0) {
-        (void)puts("pkg: invalid install target, only /shell/*.elf is allowed");
+        (void)puts("pkg: invalid install target, only /shell/apps/*.elf is allowed");
         return 0;
     }
     if (pkg_plan_dependencies(sh, manifest->depends, depth) == 0) {
@@ -470,19 +470,19 @@ int pkg_cmd_doctor(void) {
     }
 
     ok = (pkg_ensure_db_dir() != 0 && cleonos_sys_fs_stat_type(PKG_DB_DIR) == 2ULL) ? 1 : 0;
-    pkg_doctor_result("/system/pkg", ok, ok != 0 ? "directory exists" : "not writable or missing");
+    pkg_doctor_result("/system/databases/pkg", ok, ok != 0 ? "directory exists" : "not writable or missing");
     if (ok == 0) {
         ok_all = 0;
     }
 
-    ok = pkg_write_probe("/system/pkg/.doctor.tmp");
-    pkg_doctor_result("/system/pkg writable", ok, ok != 0 ? "write probe passed" : "write probe failed");
+    ok = pkg_write_probe("/system/databases/pkg/.doctor.tmp");
+    pkg_doctor_result("/system/databases/pkg writable", ok, ok != 0 ? "write probe passed" : "write probe failed");
     if (ok == 0) {
         ok_all = 0;
     }
 
-    ok = pkg_write_probe("/shell/.pkg_doctor.tmp");
-    pkg_doctor_result("/shell writable", ok, ok != 0 ? "write probe passed" : "write probe failed");
+    ok = pkg_write_probe("/shell/apps/.pkg_doctor.tmp");
+    pkg_doctor_result("/shell/apps writable", ok, ok != 0 ? "write probe passed" : "write probe failed");
     if (ok == 0) {
         ok_all = 0;
     }

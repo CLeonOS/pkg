@@ -9,12 +9,12 @@
 #include <string.h>
 #include <cJSON.h>
 
-#define PKG_DB_DIR "/system/pkg"
-#define PKG_SQLITE_PATH "/system/pkg/pkg.db"
-#define PKG_DB_PATH "/system/pkg/installed.db"
-#define PKG_LOCK_PATH "/system/pkg/lock"
-#define PKG_REPO_PATH "/system/pkg/repo.conf"
-#define PKG_SOURCES_PATH "/system/pkg/sources.db"
+#define PKG_DB_DIR "/system/databases/pkg"
+#define PKG_SQLITE_PATH "/system/databases/pkg/pkg.db"
+#define PKG_DB_PATH "/system/databases/pkg/installed.db"
+#define PKG_LOCK_PATH "/system/databases/pkg/lock"
+#define PKG_REPO_PATH "/system/databases/pkg/repo.conf"
+#define PKG_SOURCES_PATH "/system/databases/pkg/sources.db"
 #define PKG_DEFAULT_REPO "http://clospkg.ecuil.com"
 #define PKG_TMP_MANIFEST "/temp/p.clpkg"
 #define PKG_TMP_ELF "/temp/p.elf"

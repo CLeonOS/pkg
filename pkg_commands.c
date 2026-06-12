@@ -283,7 +283,7 @@ static int pkg_repo_set_active(const char *url) {
     char repo[PKG_URL_MAX];
 
     if (pkg_ensure_db_dir() == 0) {
-        (void)puts("pkg: cannot create /system/pkg");
+        (void)puts("pkg: cannot create /system/databases/pkg");
         return 0;
     }
 
@@ -311,7 +311,7 @@ static int pkg_source_write_or_remove(const char *target_name, const char *new_u
         return 0;
     }
     if (pkg_ensure_db_dir() == 0) {
-        (void)puts("pkg: cannot create /system/pkg");
+        (void)puts("pkg: cannot create /system/databases/pkg");
         return 0;
     }
 

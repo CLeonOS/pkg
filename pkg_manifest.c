@@ -40,7 +40,7 @@ int pkg_default_target(const char *name, char *out, u64 out_size) {
         return 0;
     }
 
-    ret = snprintf(out, (usize)out_size, "/shell/%s.elf", name);
+    ret = snprintf(out, (usize)out_size, "/shell/apps/%s.elf", name);
     return (ret > 0 && (u64)ret < out_size) ? 1 : 0;
 }
 
@@ -49,7 +49,7 @@ int pkg_target_is_allowed(const char *path) {
         return 0;
     }
 
-    if (pkg_has_prefix(path, "/shell/") == 0) {
+    if (pkg_has_prefix(path, "/shell/apps/") == 0) {
         return 0;
     }
 
@@ -409,7 +409,7 @@ int pkg_download_to(const char *url, const char *out_path) {
     }
 
     ush_copy(env_line, (u64)sizeof(env_line), "PWD=/;PKG=1");
-    status = cleonos_sys_exec_pathv("/shell/wget.elf", "", env_line);
+    status = cleonos_sys_exec_pathv("/shell/apps/wget.elf", "", env_line);
     (void)cleonos_sys_fs_remove(USH_CMD_CTX_PATH);
     (void)cleonos_sys_fs_remove(USH_CMD_RET_PATH);
 

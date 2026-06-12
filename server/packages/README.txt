@@ -8,7 +8,7 @@ packages/
 package.ini fields:
 
 version=1.0.0
-target=/shell/hello.elf
+target=/shell/apps/hello.elf
 description=Hello world package built by the CLeonOS kit.
 depends=
 category=demo

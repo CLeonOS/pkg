@@ -1131,7 +1131,7 @@ logged in as <?php echo pkg_html($currentUser); ?>
 <input type="hidden" name="MAX_FILE_SIZE" value="<?php echo (string)PKG_MAX_UPLOAD_BYTES; ?>">
 <p><label>Name <input name="name" required maxlength="63"></label></p>
 <p><label>Version <input name="version" value="1.0.0" required maxlength="64"></label></p>
-<p><label>Target <input name="target" placeholder="/shell/name.elf" maxlength="160"></label></p>
+<p><label>Target <input name="target" placeholder="/shell/apps/name.elf" maxlength="160"></label></p>
 <p><label>Description <input name="description" maxlength="512"></label></p>
 <p><label>Depends <input name="depends" placeholder="foo>=1.0.0,bar" maxlength="512"></label></p>
 <p><label>Category <input name="category" placeholder="network" maxlength="63"></label></p>

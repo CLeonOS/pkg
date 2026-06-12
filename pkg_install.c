@@ -454,7 +454,7 @@ int pkg_record_install(const pkg_manifest *manifest, const char *source) {
     }
 
     if (pkg_ensure_db_dir() == 0) {
-        (void)puts("pkg: cannot create /system/pkg");
+        (void)puts("pkg: cannot create /system/databases/pkg");
         return 0;
     }
 
@@ -470,7 +470,7 @@ int pkg_install_elf_file(const pkg_manifest *manifest, const char *elf_path, con
     }
 
     if (pkg_target_is_allowed(manifest->target) == 0) {
-        (void)puts("pkg: invalid install target, only /shell/*.elf is allowed");
+        (void)puts("pkg: invalid install target, only /shell/apps/*.elf is allowed");
         return 0;
     }
 
